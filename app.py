@@ -1,8 +1,11 @@
-# app.py — Hiring Management System (Flask + SQLite + openpyxl)
 import os, sqlite3, datetime, secrets, io, json
 from functools import wraps
 from flask import Flask, request, redirect, url_for, session, render_template_string, flash, send_from_directory, send_file
-from openpyxl import load_workbook, Workbook
+
+# NEW: security & CSRF
+from werkzeug.security import generate_password_hash, check_password_hash
+from flask_wtf import CSRFProtect
+from flask_wtf.csrf import generate_csrf
 
 APP_TITLE = "Hiring Management System (HMS)"
 BASE_DIR = os.path.dirname(__file__)
