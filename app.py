@@ -1,11 +1,19 @@
+# app.py — Hiring Management System (Flask + SQLite + openpyxl)
+
 import os, sqlite3, datetime, secrets, io, json
 from functools import wraps
-from flask import Flask, request, redirect, url_for, session, render_template_string, flash, send_from_directory, send_file
+from flask import (
+    Flask, request, redirect, url_for, session, render_template_string,
+    flash, send_from_directory, send_file
+)
 
 # NEW: security & CSRF
 from werkzeug.security import generate_password_hash, check_password_hash
 from flask_wtf import CSRFProtect
 from flask_wtf.csrf import generate_csrf
+
+# Excel
+from openpyxl import load_workbook, Workbook
 
 APP_TITLE = "Hiring Management System (HMS)"
 BASE_DIR = os.path.dirname(__file__)
@@ -14,7 +22,7 @@ UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 # REQUIRE an env secret in production
-SECRET_KEY = os.environ["HMS_SECRET"]   # <-- no insecure default
+SECRET_KEY = os.environ["HMS_SECRET"]
 LOGO_FILENAME = "logo.png"
 POSTS = ["Trainee","Junior Technician","Senior Technician","Staff Nurse","Doctor","DMO","Others"]
 
@@ -28,11 +36,10 @@ app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024
 # NEW: enable CSRF protection across the app
 csrf = CSRFProtect(app)
 
-# Optional: make csrf_token() available in templates explicitly
+# Make csrf_token() callable from templates
 @app.context_processor
 def inject_csrf():
     return dict(csrf_token=generate_csrf)
-
 
 # ---------- DB ----------
 def get_db():
@@ -112,6 +119,7 @@ def init_db():
       created_at TEXT NOT NULL
     );""")
 
+    # Seed users (hashed passwords)
     c.execute("SELECT COUNT(*) AS ct FROM users")
     if c.fetchone()["ct"] == 0:
         now = datetime.datetime.utcnow().isoformat()
@@ -136,7 +144,11 @@ def init_db():
           ("Mr. Rohit","clinical_therapist@dcdc.co.in",ROLE_INTERVIEWER,None,"rohit123"),
         ]
         for n,e,r,m,p in seed:
-            c.execute("INSERT INTO users(name,email,role,manager_id,passcode,created_at) VALUES(?,?,?,?,?,?)",(n,e,r,m,p,now))
+            hashed = generate_password_hash(p)
+            c.execute(
+                "INSERT INTO users(name,email,role,manager_id,passcode,created_at) VALUES(?,?,?,?,?,?)",
+                 (n,e,r,m,hashed,now)
+            )
         conn.commit()
         # link interviewers to managers
         def uid(em):
@@ -306,7 +318,7 @@ def login():
         db=get_db(); cur=db.cursor()
         cur.execute("SELECT * FROM users WHERE email=?", (email,))
         u = cur.fetchone(); db.close()
-        if u and u["passcode"]==passcode:
+        if u and check_password_hash(u["passcode"], passcode):
             session["user_id"]=u["id"]; flash("Welcome!","message"); return redirect(url_for("dashboard"))
         flash("Invalid email or passcode.","error")
     body = f"""
@@ -314,6 +326,7 @@ def login():
       <img src="{url_for('brand_logo')}" alt="logo" style="height:60px;margin-bottom:10px" onerror="this.style.display='none'">
       <h2 style="margin:6px 0">Sign in</h2>
       <form method="post" style="text-align:left">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <label>Email</label><input name="email" required>
         <label>Passcode</label><input name="passcode" type="password" required>
         <div style="margin-top:10px"><button class="btn">Login</button> <a class="btn light" href="{url_for('forgot_password')}">Forgot?</a></div>
@@ -343,6 +356,7 @@ def forgot_password():
     <div class="card" style="max-width:420px;margin:48px auto">
       <h3>Forgot Passcode</h3>
       <form method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <label>Your Email</label><input name="email" required>
         <div style="margin-top:10px"><button class="btn">Create Reset Request</button>
           <a class="btn light" href="{url_for('login')}">Back</a></div>
@@ -357,19 +371,22 @@ def profile():
     u=current_user()
     if request.method=="POST":
         old=request.form.get("old",""); new=request.form.get("new","")
-        if not new or len(new)<4: flash("New passcode must be at least 4 chars.","error")
+        if not new or len(new)<4:
+            flash("New passcode must be at least 4 chars.","error")
         else:
             db=get_db(); cur=db.cursor()
             cur.execute("SELECT passcode FROM users WHERE id=?", (u["id"],))
-            if cur.fetchone()["passcode"]!=old:
+            stored = cur.fetchone()["passcode"]
+            if not check_password_hash(stored, old):
                 db.close(); flash("Old passcode incorrect.","error"); return redirect(url_for("profile"))
-            cur.execute("UPDATE users SET passcode=? WHERE id=?", (new,u["id"]))
+            cur.execute("UPDATE users SET passcode=? WHERE id=?", (generate_password_hash(new),u["id"]))
             db.commit(); db.close(); flash("Passcode changed.","message"); return redirect(url_for("dashboard"))
     body=f"""
     <div class="card" style="max-width:480px;margin:0 auto">
       <h3>My Profile</h3>
       <p><span class="tag">{u['name']}</span> &nbsp; <span class="tag">{u['email']}</span> &nbsp; <span class="tag">{u['role']}</span></p>
       <form method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <label>Old Passcode</label><input name="old" type="password" required>
         <label>New Passcode</label><input name="new" type="password" required>
         <div style="margin-top:10px"><button class="btn">Update</button></div>
@@ -419,8 +436,6 @@ def dashboard():
     rejected = scalar(f"SELECT COUNT(*) FROM candidates WHERE {WHERE} AND lower(final_decision)='rejected'", args)
     assigned = scalar(f"SELECT COUNT(*) FROM candidates WHERE {WHERE} AND status='Assigned'", args)
     joined   = scalar(f"SELECT COUNT(*) FROM candidates WHERE {WHERE} AND hr_join_status='joined'", args)
-    status_labels = ["Selected", "Rejected", "Assigned"]
-    status_counts = [selected, rejected, assigned]
 
     cur.execute("SELECT DISTINCT post_applied FROM candidates ORDER BY post_applied")
     posts = [r[0] for r in cur.fetchall() if r[0]]
@@ -668,7 +683,6 @@ def candidates_all():
         for r in rows
     ]) or "<tr><td colspan=9>No data</td></tr>"
 
-
     body = f"""
         <div class="card"><h3>All Candidates</h3>
           {header_action}
@@ -785,6 +799,7 @@ def add_candidate():
       </div>
 
       <form id="addForm" method="post" enctype="multipart/form-data">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <div class="card section blue">
           <h4>Identity & Contact</h4>
           <div class="grid-2">
@@ -873,8 +888,6 @@ def assign_candidate(candidate_id):
         cur.execute("UPDATE candidates SET interviewer_id=?, status='Assigned' WHERE id=?", (int(iid), candidate_id))
         db.commit(); db.close(); flash("Assigned to interviewer.","message"); return redirect(url_for("candidates_all"))
 
-
-
     ivs = interviewers_for_manager(u["id"])
     opts = "".join([f"<option value='{i['id']}' {'selected' if c['interviewer_id']==i['id'] else ''}>{i['name']}</option>" for i in ivs]) or "<option disabled>No interviewers</option>"
     body=f"""
@@ -882,6 +895,7 @@ def assign_candidate(candidate_id):
       <h3>Assign Interviewer</h3>
       <p><strong>{c['full_name']}</strong> — <span class="tag">{c['post_applied']}</span></p>
       <form method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <label>Interviewer</label>
         <select name="interviewer_id">{opts}</select>
         <div style="margin-top:10px"><button class="btn">Save</button> <a class="btn light" href="{url_for('candidates_all')}">Back</a></div>
@@ -894,104 +908,96 @@ def assign_candidate(candidate_id):
 @login_required
 @role_required(ROLE_MANAGER, ROLE_ADMIN)
 def bulk_assign():
-        u = current_user()
-        db = get_db();
-        cur = db.cursor()
+    u = current_user()
+    db = get_db(); cur = db.cursor()
 
-        # managers can only assign their own candidates (admins see all)
-        base_where = "1=1"
-        args = []
-        if u["role"] != ROLE_ADMIN:
-            base_where = "manager_owner=?"
-            args = [u["id"]]
+    # managers can only assign their own candidates (admins see all)
+    base_where = "1=1"; args = []
+    if u["role"] != ROLE_ADMIN:
+        base_where = "manager_owner=?"; args = [u["id"]]
 
-        # GET → show selectable candidates + interviewer list
-        if request.method == "GET":
-            # Show candidates that still need (re)assignment
-            cur.execute(f"""
-                SELECT id, candidate_code, full_name, post_applied, status,
-                       COALESCE((SELECT name FROM users uu WHERE uu.id=c.interviewer_id), '-') as current_iv
-                FROM candidates c
-                WHERE {base_where}
-                  AND (c.interviewer_id IS NULL OR c.status IN ('Assigned','reinterview'))
-                ORDER BY datetime(c.created_at) DESC
-            """, args)
-            rows = cur.fetchall()
-
-            # Which interviewers can this manager assign to?
-            ivs = interviewers_for_manager(u["id"]) if u["role"] != ROLE_ADMIN else []
-            # If admin, allow choosing the owning manager first (optional: keep simple by listing all interviewers grouped by manager)
-            iv_opts = "".join([f"<option value='{i['id']}'>{i['name']}</option>" for i in ivs]) if ivs else ""
-
-            trs = "".join([
-                f"<tr>"
-                f"<td><input type='checkbox' name='ids' value='{r['id']}'></td>"
-                f"<td>{r['candidate_code'] or '-'}</td>"
-                f"<td>{r['full_name']}</td>"
-                f"<td>{r['post_applied']}</td>"
-                f"<td><span class='tag'>{r['status']}</span></td>"
-                f"<td>{r['current_iv']}</td>"
-                f"</tr>"
-                for r in rows
-            ]) or "<tr><td colspan='6'>No candidates available for bulk assignment.</td></tr>"
-
-            body = f"""
-            <div class="card" style="max-width:960px;margin:0 auto">
-              <h3>Bulk Assign Candidates</h3>
-              <form method="post">
-                <div class="row" style="margin-bottom:10px">
-                  <div class="col">
-                    <label>Assign to Interviewer</label>
-                    <select name="interviewer_id" required>
-                      <option value="">— select —</option>
-                      {iv_opts}
-                    </select>
-                  </div>
-                </div>
-
-                <table>
-                  <thead>
-                    <tr><th></th><th>ID</th><th>Name</th><th>Post</th><th>Status</th><th>Current Interviewer</th></tr>
-                  </thead>
-                  <tbody>{trs}</tbody>
-                </table>
-
-                <div class="sticky-actions">
-                  <button class="btn">Assign Selected</button>
-                  <a class="btn light" href="{url_for('candidates_all')}">Cancel</a>
-                </div>
-              </form>
-            </div>
-            """
-            db.close()
-            return render_page("Bulk Assign", body)
-
-        # POST → update selected ids
-        iid = request.form.get("interviewer_id", "").strip()
-        ids = request.form.getlist("ids")
-
-        if not iid.isdigit() or not ids:
-            db.close()
-            flash("Pick an interviewer and at least one candidate.", "error")
-            return redirect(url_for("bulk_assign"))
-
-        # Secure: only update rows this manager owns (unless admin)
-        placeholders = ",".join("?" for _ in ids)
-        params = [int(iid)] + ids
-        owner_guard = ""
-        if u["role"] != ROLE_ADMIN:
-            owner_guard = " AND manager_owner=?"
-            params.append(u["id"])
-
+    if request.method == "GET":
         cur.execute(f"""
-            UPDATE candidates
-            SET interviewer_id=?, status='Assigned'
-            WHERE id IN ({placeholders}){owner_guard}
-        """, params)
-        db.commit();
+            SELECT id, candidate_code, full_name, post_applied, status,
+                   COALESCE((SELECT name FROM users uu WHERE uu.id=c.interviewer_id), '-') as current_iv
+            FROM candidates c
+            WHERE {base_where}
+              AND (c.interviewer_id IS NULL OR c.status IN ('Assigned','reinterview'))
+            ORDER BY datetime(c.created_at) DESC
+        """, args)
+        rows = cur.fetchall()
+
+        ivs = interviewers_for_manager(u["id"]) if u["role"] != ROLE_ADMIN else []
+        iv_opts = "".join([f"<option value='{i['id']}'>{i['name']}</option>" for i in ivs]) if ivs else ""
+
+        trs = "".join([
+            f"<tr>"
+            f"<td><input type='checkbox' name='ids' value='{r['id']}'></td>"
+            f"<td>{r['candidate_code'] or '-'}</td>"
+            f"<td>{r['full_name']}</td>"
+            f"<td>{r['post_applied']}</td>"
+            f"<td><span class='tag'>{r['status']}</span></td>"
+            f"<td>{r['current_iv']}</td>"
+            f"</tr>"
+            for r in rows
+        ]) or "<tr><td colspan='6'>No candidates available for bulk assignment.</td></tr>"
+
+        body = f"""
+        <div class="card" style="max-width:960px;margin:0 auto">
+          <h3>Bulk Assign Candidates</h3>
+          <form method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <div class="row" style="margin-bottom:10px">
+              <div class="col">
+                <label>Assign to Interviewer</label>
+                <select name="interviewer_id" required>
+                  <option value="">— select —</option>
+                  {iv_opts}
+                </select>
+              </div>
+            </div>
+
+            <table>
+              <thead>
+                <tr><th></th><th>ID</th><th>Name</th><th>Post</th><th>Status</th><th>Current Interviewer</th></tr>
+              </thead>
+              <tbody>{trs}</tbody>
+            </table>
+
+            <div class="sticky-actions">
+              <button class="btn">Assign Selected</button>
+              <a class="btn light" href="{url_for('candidates_all')}">Cancel</a>
+            </div>
+          </form>
+        </div>
+        """
         db.close()
-        flash("Candidates assigned.", "message")
-        return redirect(url_for("candidates_all"))
+        return render_page("Bulk Assign", body)
+
+    # POST → update selected ids
+    iid = request.form.get("interviewer_id", "").strip()
+    ids = request.form.getlist("ids")
+
+    if not iid.isdigit() or not ids:
+        db.close()
+        flash("Pick an interviewer and at least one candidate.", "error")
+        return redirect(url_for("bulk_assign"))
+
+    placeholders = ",".join("?" for _ in ids)
+    params = [int(iid)] + ids
+    owner_guard = ""
+    if u["role"] != ROLE_ADMIN:
+        owner_guard = " AND manager_owner=?"
+        params.append(u["id"])
+
+    cur.execute(f"""
+        UPDATE candidates
+        SET interviewer_id=?, status='Assigned'
+        WHERE id IN ({placeholders}){owner_guard}
+    """, params)
+    db.commit(); db.close()
+    flash("Candidates assigned.", "message")
+    return redirect(url_for("candidates_all"))
 
 # ---------- Interviewer: feedback / decision (to manager) ----------
 @app.route("/interview/<int:candidate_id>", methods=["GET","POST"])
@@ -1009,7 +1015,7 @@ def interview_feedback(candidate_id):
         decision = request.form.get("decision","").strip().lower()
         rating   = request.form.get("rating","").strip()
         feedback = request.form.get("feedback","").strip()
-        try: r = int(rating);
+        try: r = int(rating)
         except: r = None
         now = datetime.datetime.utcnow().isoformat()
         if decision not in ("selected","rejected","reinterview"):
@@ -1028,6 +1034,7 @@ def interview_feedback(candidate_id):
       <h3>Interviewer Feedback</h3>
       <p><strong>{c['full_name']}</strong> — <span class="tag">{c['post_applied']}</span></p>
       <form method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <div class="row">
           <div class="col"><label>Rating (1-5)</label><input name="rating" placeholder="e.g. 4"></div>
         </div>
@@ -1138,6 +1145,7 @@ def bulk_upload():
       <p>Expected columns: <span class="tag">{sample_cols}</span></p>
       <p><a class="btn light" href="{url_for('bulk_sample')}">Download Sample Excel</a></p>
       <form method="post" enctype="multipart/form-data">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <label>Choose .xlsx file</label><input type="file" name="xlsx" accept=".xlsx" required>
         <div style="margin-top:10px"><button class="btn">Upload</button> <a class="btn light" href="{url_for('candidates_all')}">Back</a></div>
       </form>
@@ -1206,6 +1214,7 @@ def finalize_candidate(candidate_id):
       <p><strong>{c['full_name']}</strong> — <span class="tag">{c['post_applied']}</span></p>
       {last_block}
       <form method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <label>Final Remark</label><textarea name="remark" rows="4"></textarea>
         <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
           <button name="action" value="select" class="btn">Select</button>
@@ -1325,6 +1334,7 @@ def hr_join_update(candidate_id):
       </div>
 
       <form method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <label>Status</label>
         <select name="status" id="status" onchange="toggleReason()">
           <option value="joined">Joined</option>
@@ -1370,7 +1380,7 @@ def admin_users():
             mid=int(manager_id) if manager_id.isdigit() else None
             try:
                 cur.execute("INSERT INTO users(name,email,role,manager_id,passcode,created_at) VALUES(?,?,?,?,?,?)",
-                            (name,email,role,mid,passcode,datetime.datetime.utcnow().isoformat()))
+                            (name,email,role,mid,generate_password_hash(passcode),datetime.datetime.utcnow().isoformat()))
                 db.commit(); flash("User added.","message")
             except sqlite3.IntegrityError:
                 flash("Email already exists.","error")
@@ -1385,6 +1395,7 @@ def admin_users():
     <div class="card">
       <h3>Add User</h3>
       <form method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <div class="row">
           <div class="col"><label>Name</label><input name="name" required></div>
           <div class="col"><label>Email</label><input name="email" required></div>
@@ -1418,9 +1429,13 @@ def admin_resets():
             cur.execute("SELECT * FROM password_resets WHERE id=? AND state='open'", (int(rid),))
             row=cur.fetchone()
             if row:
-                cur.execute("UPDATE users SET passcode=? WHERE email=?", (newp,row["user_email"]))
-                cur.execute("""UPDATE password_resets SET state='resolved', resolved_at=?, resolver_id=?, new_passcode=? WHERE id=?""",
-                            (datetime.datetime.utcnow().isoformat(), current_user()["id"], newp, int(rid)))
+                # Hash the new passcode; do NOT store plaintext anywhere
+                cur.execute("UPDATE users SET passcode=? WHERE email=?", (generate_password_hash(newp),row["user_email"]))
+                cur.execute("""
+                    UPDATE password_resets SET state='resolved', resolved_at=?, resolver_id=?, new_passcode=NULL
+                    WHERE id=?""",
+                    (datetime.datetime.utcnow().isoformat(), current_user()["id"], int(rid))
+                )
                 db.commit(); flash("Reset resolved and passcode updated.","message")
             else:
                 flash("Reset not found or already resolved.","error")
@@ -1441,6 +1456,7 @@ def admin_resets():
     <div class="card" style="max-width:560px">
       <h3>Resolve a Request</h3>
       <form method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <label>Request ID</label><input name="rid" required>
         <label>New Passcode</label><input name="new" required>
         <div style="margin-top:10px"><button class="btn">Set New Passcode</button> <a class="btn light" href="{url_for('admin_users')}">Back</a></div>
@@ -1453,4 +1469,4 @@ def admin_resets():
 if __name__=="__main__":
     init_db()
     port=int(os.environ.get("PORT",5000))
-    app.run(host="0.0.0.0", port=port, debug=True)
+    app.run(host="0.0.0.0", port=port)  # debug removed
