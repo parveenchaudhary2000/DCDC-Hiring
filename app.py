@@ -13,7 +13,8 @@ DB_PATH = os.path.join(BASE_DIR, "hms.db")
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-SECRET_KEY = os.environ.get("HMS_SECRET", "change-this-in-prod")
+# REQUIRE an env secret in production
+SECRET_KEY = os.environ["HMS_SECRET"]   # <-- no insecure default
 LOGO_FILENAME = "logo.png"
 POSTS = ["Trainee","Junior Technician","Senior Technician","Staff Nurse","Doctor","DMO","Others"]
 
