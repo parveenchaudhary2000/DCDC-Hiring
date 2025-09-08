@@ -25,6 +25,15 @@ app = Flask(__name__)
 app.secret_key = SECRET_KEY
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024
 
+# NEW: enable CSRF protection across the app
+csrf = CSRFProtect(app)
+
+# Optional: make csrf_token() available in templates explicitly
+@app.context_processor
+def inject_csrf():
+    return dict(csrf_token=generate_csrf)
+
+
 # ---------- DB ----------
 def get_db():
     conn = sqlite3.connect(DB_PATH)
