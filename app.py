@@ -1,4 +1,4 @@
-# app.py — Hiring Management System (Flask + SQLite + openpyxl + SendGrid)
+# app.py — Hiring Management System (Flask + SQLite + openpyxl + SendGrid + CSRF auto-inject)
 import os, re, sqlite3, datetime, secrets, io, json
 from functools import wraps
 from flask import Flask, request, redirect, url_for, session, render_template_string, flash, send_from_directory, send_file
@@ -13,7 +13,9 @@ from flask_wtf.csrf import generate_csrf
 from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail
 
-def send_email(to: str, subject: str, html: str):
+# ---------- Email helper ----------
+def send_email(to, subject, html):
+    """SendGrid mail helper (requires SENDGRID_API_KEY, MAIL_FROM)."""
     sg = SendGridAPIClient(os.environ["SENDGRID_API_KEY"])
     msg = Mail(from_email=os.environ["MAIL_FROM"], to_emails=to, subject=subject, html_content=html)
     sg.send(msg)
@@ -24,10 +26,8 @@ DB_PATH = os.path.join(BASE_DIR, "hms.db")
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-# Required envs
+# Require a secret via env (set it in your WSGI / web env)
 SECRET_KEY = os.environ["HMS_SECRET"]
-APP_BASE_URL = os.environ["APP_BASE_URL"]  # e.g. https://dcdchiringsystem.pythonanywhere.com
-
 LOGO_FILENAME = "logo.png"
 POSTS = ["Trainee","Junior Technician","Senior Technician","Staff Nurse","Doctor","DMO","Others"]
 
@@ -43,7 +43,7 @@ csrf = CSRFProtect(app)
 
 # Make csrf_token() available in templates
 @app.context_processor
-def inject_csrf():
+def inject_csrf_ctx():
     return dict(csrf_token=generate_csrf)
 
 # Auto-inject CSRF hidden input into every POST form in HTML responses
@@ -57,6 +57,7 @@ def inject_csrf_inputs(response):
             html = pattern.sub(lambda m: m.group(1) + f'\n<input type="hidden" name="csrf_token" value="{token}">', html)
             response.set_data(html)
     except Exception:
+        # Page should still render even if injection fails
         pass
     return response
 
@@ -66,15 +67,9 @@ def get_db():
     conn.row_factory = sqlite3.Row
     return conn
 
-def _ensure_col(cur, table, name, coltype):
-    cur.execute(f"PRAGMA table_info({table})")
-    names = {r["name"] for r in cur.fetchall()}
-    if name not in names:
-        cur.execute(f"ALTER TABLE {table} ADD COLUMN {name} {coltype}")
-
 def init_db():
     conn = get_db(); c = conn.cursor()
-    # users
+
     c.execute("""
     CREATE TABLE IF NOT EXISTS users(
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -84,9 +79,8 @@ def init_db():
       manager_id INTEGER,
       passcode TEXT NOT NULL,
       created_at TEXT NOT NULL
-    );
-    """)
-    # password_resets
+    );""")
+
     c.execute("""
     CREATE TABLE IF NOT EXISTS password_resets(
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -96,13 +90,8 @@ def init_db():
       resolved_at TEXT,
       resolver_id INTEGER,
       new_passcode TEXT
-    );
-    """)
-    # add email-flow columns if missing
-    _ensure_col(c, "password_resets", "token", "TEXT")
-    _ensure_col(c, "password_resets", "expires_at", "TEXT")
+    );""")
 
-    # candidates
     c.execute("""
     CREATE TABLE IF NOT EXISTS candidates(
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -136,9 +125,8 @@ def init_db():
       finalized_at TEXT,
       hr_join_status TEXT,
       hr_joined_at TEXT
-    );
-    """)
-    # interviews
+    );""")
+
     c.execute("""
     CREATE TABLE IF NOT EXISTS interviews(
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -149,16 +137,26 @@ def init_db():
       decision TEXT,
       is_reinterview INTEGER DEFAULT 0,
       created_at TEXT NOT NULL
-    );
-    """)
+    );""")
 
-    # seed users once
+    # NEW: notifications table
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS notifications(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      text TEXT NOT NULL,
+      is_read INTEGER DEFAULT 0,
+      created_at TEXT NOT NULL
+    );""")
+
+    # Seed users if empty
     c.execute("SELECT COUNT(*) AS ct FROM users")
     if c.fetchone()["ct"] == 0:
         now = datetime.datetime.utcnow().isoformat()
         seed = [
           ("Mr. Parveen Chaudhary","clinicalanalyst@dcdc.co.in",ROLE_ADMIN,None,"admin123"),
           ("Mr. Deepak Agarwal","drdeepak@dcdc.co.in",ROLE_VP,None,"vp123"),
+
           ("Ms. Barkha","jobs@dcdc.co.in",ROLE_HR,None,"hr123"),
           ("Deepika","hiring@dcdc.co.in",ROLE_HR,None,"hrdp123"),
           ("Karishma","hr_hiring@dcdc.co.in",ROLE_HR,None,"hrka123"),
@@ -167,6 +165,7 @@ def init_db():
           ("Ravi","hiring_3@dcdc.co.in",ROLE_HR,None,"hrrv123"),
           ("Shivani","recruitments@dcdc.co.in",ROLE_HR,None,"hrsv123"),
           ("Udita","careers@dcdc.co.in",ROLE_HR,None,"hrud123"),
+
           ("Dr. Yasir Anis","clinical_manager@dcdc.co.in",ROLE_MANAGER,None,"yasir123"),
           ("Ms. Prachi","infectioncontroller@dcdc.co.in",ROLE_INTERVIEWER,None,"prachi123"),
           ("Mr. Shaikh Saadi","dialysis.coord@dcdc.co.in",ROLE_MANAGER,None,"saadi123"),
@@ -177,9 +176,9 @@ def init_db():
         for n,e,r,m,p in seed:
             c.execute(
                 "INSERT INTO users(name,email,role,manager_id,passcode,created_at) VALUES(?,?,?,?,?,?)",
-                (n,e,r,m,generate_password_hash(p),now)
+                 (n,e,r,m,generate_password_hash(p),now)
             )
-        # link interviewers
+        # link interviewers to managers
         def uid(em):
             c.execute("SELECT id FROM users WHERE email=?", (em,)); rr=c.fetchone(); return rr["id"] if rr else None
         yasir = uid("clinical_manager@dcdc.co.in")
@@ -187,7 +186,8 @@ def init_db():
         c.execute("UPDATE users SET manager_id=? WHERE email='infectioncontroller@dcdc.co.in'", (yasir,))
         for em in ("rmclinical_4@dcdc.co.in","rmclinical_6@dcdc.co.in","clinical_therapist@dcdc.co.in"):
             c.execute("UPDATE users SET manager_id=? WHERE email=?", (saadi, em))
-    conn.commit(); conn.close()
+        conn.commit()
+    conn.close()
 
 def user_id_by_email(email:str):
     db=get_db(); cur=db.cursor()
@@ -236,6 +236,15 @@ def interviewers_for_manager(mid:int):
     cur.execute("SELECT id,name FROM users WHERE role='interviewer' AND manager_id=? ORDER BY name", (mid,))
     rows = cur.fetchall(); db.close()
     return rows
+
+# NEW: notification helper
+def notify(user_id:int, text:str):
+    db = get_db(); cur = db.cursor()
+    cur.execute(
+        "INSERT INTO notifications(user_id, text, created_at) VALUES(?,?,?)",
+        (user_id, text, datetime.datetime.utcnow().isoformat())
+    )
+    db.commit(); db.close()
 
 # ---------- UI ----------
 BASE_HTML = """
@@ -302,6 +311,9 @@ BASE_HTML = """
       {% if user['role'] in ['admin'] %}
         <a href="{{ url_for('admin_users') }}">Admin</a>
       {% endif %}
+      <a href="{{ url_for('notifications') }}">
+        Notifications{% if unread_count %} <span class="badge">{{ unread_count }}</span>{% endif %}
+      </a>
       <a href="{{ url_for('profile') }}">Profile</a>
       <a href="{{ url_for('logout') }}">Logout</a>
     {% else %}
@@ -326,13 +338,23 @@ BASE_HTML = """
 """
 
 def render_page(title, body_html):
-    return render_template_string(BASE_HTML, title=title, app_title=APP_TITLE, user=current_user(), body=body_html)
+    u = current_user()
+    unread = 0
+    if u:
+        db = get_db(); cur = db.cursor()
+        cur.execute("SELECT COUNT(*) FROM notifications WHERE user_id=? AND is_read=0", (u["id"],))
+        unread = cur.fetchone()[0] or 0
+        db.close()
+    return render_template_string(
+        BASE_HTML, title=title, app_title=APP_TITLE, user=u, body=body_html, unread_count=unread
+    )
 
-# logo
+# serve logo
 @app.route("/brand-logo")
 def brand_logo():
     path = os.path.join(BASE_DIR, LOGO_FILENAME)
-    if os.path.exists(path): return send_from_directory(BASE_DIR, LOGO_FILENAME)
+    if os.path.exists(path):
+        return send_from_directory(BASE_DIR, LOGO_FILENAME)
     from flask import Response
     return Response(b"GIF89a\x01\x00\x01\x00\x80\x00\x00\xff\xff\xff\x00\x00\x00!\xf9\x04\x01\n\x00\x01\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;", mimetype="image/gif")
 
@@ -365,87 +387,30 @@ def login():
 def logout():
     session.clear(); return redirect(url_for("login"))
 
-# ---------- Forgot/Reset via email ----------
 @app.route("/forgot", methods=["GET","POST"])
 def forgot_password():
     if request.method=="POST":
-        email = (request.form.get("email") or "").strip().lower()
-        now = datetime.datetime.utcnow()
+        email = request.form.get("email","").strip().lower()
+        now = datetime.datetime.utcnow().isoformat()
         db=get_db(); cur=db.cursor()
         cur.execute("SELECT 1 FROM users WHERE email=?", (email,))
-        # Always behave the same for privacy
         if cur.fetchone():
-            token = secrets.token_urlsafe(32)
-            expires = (now + datetime.timedelta(hours=1)).isoformat()
-            cur.execute(
-                "INSERT INTO password_resets(user_email,state,created_at,token,expires_at) VALUES(?,?,?,?,?)",
-                (email,"open",now.isoformat(),token,expires)
-            )
+            cur.execute("INSERT INTO password_resets(user_email,state,created_at) VALUES(?,?,?)",(email,"open",now))
             db.commit()
-            reset_link = f"{APP_BASE_URL}/reset/{token}"
-            try:
-                send_email(
-                    to=email,
-                    subject="HMS: Reset your passcode",
-                    html=f"<p>Click to reset your passcode (valid 1 hour): "
-                         f"<a href='{reset_link}'>{reset_link}</a></p>"
-                )
-            except Exception:
-                # Do not leak errors to user; check logs if needed
-                pass
         db.close()
-        flash("If the email exists, a reset link was sent.","message")
+        flash("If the email exists, a reset request has been created.","message")
         return redirect(url_for("login"))
     body=f"""
     <div class="card" style="max-width:420px;margin:48px auto">
       <h3>Forgot Passcode</h3>
       <form method="post">
         <label>Your Email</label><input name="email" required>
-        <div style="margin-top:10px"><button class="btn">Send Reset Link</button>
+        <div style="margin-top:10px"><button class="btn">Create Reset Request</button>
           <a class="btn light" href="{url_for('login')}">Back</a></div>
       </form>
     </div>
     """
     return render_page("Forgot Password", body)
-
-@app.route("/reset/<token>", methods=["GET","POST"])
-def reset_with_token(token):
-    db=get_db(); cur=db.cursor()
-    now = datetime.datetime.utcnow().isoformat()
-    cur.execute("""SELECT * FROM password_resets
-                   WHERE token=? AND state='open' AND (expires_at IS NULL OR expires_at>?)""",
-                (token, now))
-    row = cur.fetchone()
-    if not row:
-        db.close()
-        body = "<div class='card' style='max-width:480px;margin:48px auto'><h3>Reset link invalid or expired.</h3><a class='btn' href='/forgot'>Request new link</a></div>"
-        return render_page("Reset", body)
-
-    if request.method=="POST":
-        newp = (request.form.get("new") or "").strip()
-        if len(newp) < 4:
-            flash("Use 4+ characters.","error")
-            return redirect(url_for("reset_with_token", token=token))
-        cur.execute("UPDATE users SET passcode=? WHERE email=?",
-                    (generate_password_hash(newp), row["user_email"]))
-        cur.execute("""UPDATE password_resets
-                       SET state='resolved', resolved_at=?, new_passcode=NULL
-                       WHERE id=?""", (datetime.datetime.utcnow().isoformat(), row["id"]))
-        db.commit(); db.close()
-        flash("Passcode updated. Please log in.","message")
-        return redirect(url_for("login"))
-
-    db.close()
-    body = f"""
-    <div class="card" style="max-width:480px;margin:48px auto">
-      <h3>Set new passcode</h3>
-      <form method="post">
-        <label>New Passcode</label><input name="new" type="password" required>
-        <div style="margin-top:10px"><button class="btn">Update</button> <a class="btn light" href="{url_for('login')}">Cancel</a></div>
-      </form>
-    </div>
-    """
-    return render_page("Reset", body)
 
 @app.route("/profile", methods=["GET","POST"])
 @login_required
@@ -506,6 +471,7 @@ def dashboard():
     if q_to:     where.append("date(substr(created_at,1,10))<=date(?)"); args.append(q_to)
 
     WHERE = " AND ".join(where)
+
     def scalar(sql, a=()):
         cur.execute(sql, a); r = cur.fetchone(); return r[0] if r else 0
 
@@ -606,22 +572,27 @@ def dashboard():
       const lineLabels   = {json.dumps(line_labels)};
       const lineSel      = {json.dumps(line_sel)};
       const lineJoin     = {json.dumps(line_join)};
+
       new Chart(document.getElementById('statusPie'), {{
         type: 'pie',
         data: {{ labels: statusLabels, datasets: [{{ data: statusCounts }}] }},
-        options: {{ responsive: true }}
       }});
+
       new Chart(document.getElementById('regionBar'), {{
         type: 'bar',
         data: {{ labels: regionLabels, datasets: [{{ label: 'Candidates', data: regionCounts }}] }},
         options: {{ responsive: true, scales: {{ y: {{ beginAtZero: true }} }} }}
       }});
+
       new Chart(document.getElementById('selJoinLine'), {{
         type: 'line',
-        data: {{ labels: lineLabels, datasets: [
-          {{ label: 'Selected', data: lineSel, tension: 0.35 }},
-          {{ label: 'Joined',   data: lineJoin, tension: 0.35 }}
-        ]}},
+        data: {{
+          labels: lineLabels,
+          datasets: [
+            {{ label: 'Selected', data: lineSel, tension: 0.35 }},
+            {{ label: 'Joined',   data: lineJoin, tension: 0.35 }}
+          ]
+        }},
         options: {{ responsive: true }}
       }});
     }})();
@@ -769,17 +740,21 @@ def manager_for_post(post:str):
 def add_candidate():
     if request.method=="POST":
         f = request.form
-        file = request.files.get("cv"); cv_path=None
+        file = request.files.get("cv")
+        cv_path=None
         if file and file.filename:
             safe = _safe_cv_filename(file.filename)
-            file.save(os.path.join(UPLOAD_DIR, safe)); cv_path=safe
+            file.save(os.path.join(UPLOAD_DIR, safe))
+            cv_path=safe
 
         raw_phone = (f.get("phone") or "").strip()
         digits_only = "".join(ch for ch in raw_phone if ch.isdigit())
         if len(digits_only) != 10:
-            flash("Mobile number must be exactly 10 digits.","error"); return redirect(url_for("add_candidate"))
+            flash("Mobile number must be exactly 10 digits.","error")
+            return redirect(url_for("add_candidate"))
 
         candidate_code = (f.get("candidate_code") or "").strip() or next_candidate_code()
+
         fields = dict(
             candidate_code=candidate_code,
             salutation=f.get("salutation","").strip(),
@@ -800,12 +775,15 @@ def add_candidate():
             remarks=f.get("remarks","").strip(),
         )
         if not fields["full_name"] or fields["post_applied"] not in POSTS:
-            flash("Name and valid Post Applied are required.","error"); return redirect(url_for("add_candidate"))
+            flash("Name and valid Post Applied are required.","error")
+            return redirect(url_for("add_candidate"))
 
         try: ey = float(fields["experience_years"]) if fields["experience_years"] else None
         except: ey = None
 
-        manager_id = manager_for_post(fields["post_applied"]); status = "Assigned"
+        manager_id = manager_for_post(fields["post_applied"])
+        status = "Assigned"
+
         u=current_user(); now=datetime.datetime.utcnow().isoformat()
         db=get_db(); cur=db.cursor()
         cur.execute("""
@@ -904,7 +882,8 @@ def assign_candidate(candidate_id):
     u=current_user()
     db=get_db(); cur=db.cursor()
     cur.execute("SELECT * FROM candidates WHERE id=?", (candidate_id,)); c=cur.fetchone()
-    if not c: db.close(); flash("Not found.","error"); return redirect(url_for("candidates_all"))
+    if not c:
+        db.close(); flash("Not found.","error"); return redirect(url_for("candidates_all"))
     if u["role"]!=ROLE_ADMIN and c["manager_owner"]!=u["id"]:
         db.close(); flash("You do not own this candidate.","error"); return redirect(url_for("candidates_all"))
 
@@ -912,8 +891,41 @@ def assign_candidate(candidate_id):
         iid = request.form.get("interviewer_id","").strip()
         if not iid.isdigit():
             db.close(); flash("Choose an interviewer.","error"); return redirect(url_for("assign_candidate",candidate_id=candidate_id))
+
+        # fetch details before update
+        cur.execute("SELECT full_name, post_applied FROM candidates WHERE id=?", (candidate_id,))
+        cand = cur.fetchone()
+        cur.execute("SELECT email, name FROM users WHERE id=?", (int(iid),))
+        iv = cur.fetchone()
+
+        # assign
         cur.execute("UPDATE candidates SET interviewer_id=?, status='Assigned' WHERE id=?", (int(iid), candidate_id))
-        db.commit(); db.close(); flash("Assigned to interviewer.","message"); return redirect(url_for("candidates_all"))
+        db.commit(); db.close()
+
+        # in-app notification
+        notify(int(iid), f"New candidate assigned: {cand['full_name']} ({cand['post_applied']})")
+
+        # email (best-effort)
+        try:
+            base = os.environ.get("APP_BASE_URL","").rstrip("/")
+            link = f"{base}{url_for('interview_feedback', candidate_id=candidate_id)}" if base else ""
+            send_email(
+                to=iv["email"],
+                subject=f"New Candidate Assigned: {cand['full_name']}",
+                html=f"""
+                  <p>Hi {iv['name']},</p>
+                  <p>A new candidate has been assigned to you:</p>
+                  <ul>
+                    <li><b>Name:</b> {cand['full_name']}</li>
+                    <li><b>Post:</b> {cand['post_applied']}</li>
+                  </ul>
+                  {f'<p><a href="{link}">Open in HMS</a></p>' if link else ''}
+                """
+            )
+        except Exception as e:
+            flash(f"Assigned (email send skipped: {e}).","error")
+
+        flash("Assigned to interviewer.","message"); return redirect(url_for("candidates_all"))
 
     ivs = interviewers_for_manager(u["id"])
     opts = "".join([f"<option value='{i['id']}' {'selected' if c['interviewer_id']==i['id'] else ''}>{i['name']}</option>" for i in ivs]) or "<option disabled>No interviewers</option>"
@@ -935,8 +947,10 @@ def assign_candidate(candidate_id):
 @role_required(ROLE_MANAGER, ROLE_ADMIN)
 def bulk_assign():
     u = current_user(); db = get_db(); cur = db.cursor()
+
     base_where = "1=1"; args = []
-    if u["role"] != ROLE_ADMIN: base_where = "manager_owner=?"; args = [u["id"]]
+    if u["role"] != ROLE_ADMIN:
+        base_where = "manager_owner=?"; args = [u["id"]]
 
     if request.method == "GET":
         cur.execute(f"""
@@ -1002,14 +1016,40 @@ def bulk_assign():
     placeholders = ",".join("?" for _ in ids)
     params = [int(iid)] + ids
     owner_guard = ""
-    if u["role"] != ROLE_ADMIN: owner_guard = " AND manager_owner=?"; params.append(u["id"])
+    if u["role"] != ROLE_ADMIN:
+        owner_guard = " AND manager_owner=?"; params.append(u["id"])
 
     cur.execute(f"UPDATE candidates SET interviewer_id=?, status='Assigned' WHERE id IN ({placeholders}){owner_guard}", params)
-    db.commit(); db.close()
+    db.commit()
+
+    # Build notifications + email after commit
+    iv_id = int(iid)
+    cur.execute("SELECT email, name FROM users WHERE id=?", (iv_id,))
+    iv = cur.fetchone()
+    cur.execute(f"SELECT full_name, post_applied FROM candidates WHERE id IN ({placeholders})", ids)
+    assigned = cur.fetchall()
+    db.close()
+
+    for r in assigned:
+        notify(iv_id, f"New candidate assigned: {r['full_name']} ({r['post_applied']})")
+
+    try:
+        items = "".join([f"<li>{r['full_name']} — {r['post_applied']}</li>" for r in assigned])
+        base = os.environ.get("APP_BASE_URL","").rstrip("/")
+        link = f"{base}{url_for('candidates_all')}" if base else ""
+        send_email(
+            to=iv["email"],
+            subject=f"{len(assigned)} candidate(s) assigned to you",
+            html=f"<p>Hi {iv['name']},</p><p>The following candidate(s) were assigned:</p><ul>{items}</ul>"
+                 + (f'<p><a href="{link}">Open HMS</a></p>' if link else "")
+        )
+    except Exception as e:
+        flash(f"Bulk assigned (email send skipped: {e}).","error")
+
     flash("Candidates assigned.","message")
     return redirect(url_for("candidates_all"))
 
-# ---------- Interviewer feedback ----------
+# ---------- Interviewer: feedback / decision (to manager) ----------
 @app.route("/interview/<int:candidate_id>", methods=["GET","POST"])
 @login_required
 @role_required(ROLE_INTERVIEWER)
@@ -1020,9 +1060,9 @@ def interview_feedback(candidate_id):
         db.close(); flash("Not allowed.","error"); return redirect(url_for("candidates_all"))
 
     if request.method=="POST":
-        decision = (request.form.get("decision") or "").strip().lower()
-        rating   = (request.form.get("rating") or "").strip()
-        feedback = (request.form.get("feedback") or "").strip()
+        decision = request.form.get("decision","").strip().lower()
+        rating   = request.form.get("rating","").strip()
+        feedback = request.form.get("feedback","").strip()
         try: r = int(rating)
         except: r = None
         now = datetime.datetime.utcnow().isoformat()
@@ -1087,7 +1127,7 @@ def bulk_upload():
 
         try:
             wb = load_workbook(xpath); ws = wb.active
-            headers = [ (ws.cell(row=1,col=i).value or "").strip().lower() for i in range(1, ws.max_column+1) ]
+            headers = [ (ws.cell(row=1,column=i).value or "").strip().lower() for i in range(1, ws.max_column+1) ]
             def idx(label):
                 l=label.strip().lower()
                 return headers.index(l) if l in headers else None
@@ -1236,6 +1276,7 @@ def finalize_candidate(candidate_id):
 @role_required(ROLE_HR, ROLE_ADMIN)
 def hr_join_queue():
     u = current_user(); db = get_db(); cur = db.cursor()
+
     base_sql = """
       SELECT c.id, c.full_name, c.post_applied, 
              COALESCE(c.final_remark,'-') AS final_remark,
@@ -1247,10 +1288,12 @@ def hr_join_queue():
         AND lower(c.final_decision)='selected'
         AND c.hr_join_status IS NULL
     """
+
     if is_hr_head(u) or u["role"]==ROLE_ADMIN:
         cur.execute(base_sql + " ORDER BY c.finalized_at DESC")
     else:
         cur.execute(base_sql + " AND c.created_by=? ORDER BY c.finalized_at DESC", (u["id"],))
+
     rows = cur.fetchall(); db.close()
 
     if not rows:
@@ -1306,10 +1349,12 @@ def hr_join_update(candidate_id):
     if request.method == "POST":
         st = request.form.get("status")
         reason = request.form.get("reason", "").strip() if st == "not_joined" else None
+
         if st not in ("joined", "not_joined"):
             db.close(); flash("Invalid status.","error"); return redirect(url_for("hr_join_update", candidate_id=candidate_id))
         if st == "not_joined" and not reason:
             db.close(); flash("Please provide reason for Not Joined.","error"); return redirect(url_for("hr_join_update", candidate_id=candidate_id))
+
         now = datetime.datetime.utcnow().isoformat()
         cur.execute(
             "UPDATE candidates SET hr_join_status=?, hr_joined_at=?, status='closed', final_remark=? WHERE id=?",
@@ -1358,102 +1403,32 @@ def hr_join_update(candidate_id):
     """
     return render_page("HR Join Update", body)
 
-# ---------- Admin ----------
-@app.route("/admin/users", methods=["GET","POST"])
+# ---------- Notifications ----------
+@app.route("/notifications", methods=["GET","POST"])
 @login_required
-@role_required(ROLE_ADMIN)
-def admin_users():
-    db=get_db(); cur=db.cursor()
-    if request.method=="POST":
-        name=request.form.get("name","").strip()
-        email=request.form.get("email","").strip().lower()
-        role=request.form.get("role","").strip()
-        manager_id=request.form.get("manager_id","").strip()
-        passcode=request.form.get("passcode","").strip()
-        if not name or not email or role not in (ROLE_ADMIN,ROLE_VP,ROLE_HR,ROLE_MANAGER,ROLE_INTERVIEWER) or not passcode:
-            flash("Provide name, email, role, passcode.","error")
-        else:
-            mid=int(manager_id) if manager_id.isdigit() else None
-            try:
-                cur.execute("INSERT INTO users(name,email,role,manager_id,passcode,created_at) VALUES(?,?,?,?,?,?)",
-                            (name,email,role,mid,generate_password_hash(passcode),datetime.datetime.utcnow().isoformat()))
-                db.commit(); flash("User added.","message")
-            except sqlite3.IntegrityError:
-                flash("Email already exists.","error")
-    cur.execute("SELECT id,name,email,role,manager_id FROM users ORDER BY role,name")
-    users=cur.fetchall()
-    opts_role="".join([f"<option value='{r}'>{r}</option>" for r in [ROLE_ADMIN,ROLE_VP,ROLE_HR,ROLE_MANAGER,ROLE_INTERVIEWER]])
-    cur.execute("SELECT id,name FROM users WHERE role IN ('manager') ORDER BY name"); mgrs=cur.fetchall()
-    opts_mgr="<option value=''>—</option>" + "".join([f"<option value='{m['id']}'>{m['name']}</option>" for m in mgrs])
-    rows="".join([f"<tr><td>{u['id']}</td><td>{u['name']}</td><td>{u['email']}</td><td>{u['role']}</td><td>{u['manager_id'] or '-'}</td></tr>" for u in users])
-    db.close()
-    body=f"""
+def notifications():
+    u = current_user()
+    db = get_db(); cur = db.cursor()
+    if request.method == "POST":
+        cur.execute("UPDATE notifications SET is_read=1 WHERE user_id=?", (u["id"],))
+        db.commit()
+    cur.execute("""SELECT text, created_at, is_read
+                   FROM notifications WHERE user_id=?
+                   ORDER BY datetime(created_at) DESC""", (u["id"],))
+    rows = cur.fetchall(); db.close()
+    rows_html = "".join([
+        f"<tr><td>{r['text']}</td>"
+        f"<td>{r['created_at'][:19].replace('T',' ')}</td>"
+        f"<td>{'New' if r['is_read']==0 else 'Read'}</td></tr>"
+    ]) or "<tr><td colspan=3>No notifications</td></tr>"
+    body = f"""
     <div class="card">
-      <h3>Add User</h3>
-      <form method="post">
-        <div class="row">
-          <div class="col"><label>Name</label><input name="name" required></div>
-          <div class="col"><label>Email</label><input name="email" required></div>
-          <div class="col"><label>Role</label><select name="role">{opts_role}</select></div>
-          <div class="col"><label>Manager (if interviewer)</label><select name="manager_id">{opts_mgr}</select></div>
-          <div class="col"><label>Passcode</label><input name="passcode" required></div>
-        </div>
-        <div style="margin-top:10px"><button class="btn">Create</button></div>
-      </form>
-    </div>
-    <div class="card">
-      <h3>Users</h3>
-      <table><thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Role</th><th>Manager</th></tr></thead>
-      <tbody>{rows or '<tr><td colspan=5>No users</td></tr>'}</tbody></table>
-    </div>
-    <div class="card">
-      <h3>Password Reset Requests</h3>
-      <p><a class="btn" href="{url_for('admin_resets')}">Manage Resets</a></p>
+      <h3>Notifications</h3>
+      <form method="post" style="margin-bottom:10px"><button class="btn light">Mark all read</button></form>
+      <table><thead><tr><th>Message</th><th>Time</th><th>Status</th></tr></thead><tbody>{rows_html}</tbody></table>
     </div>
     """
-    return render_page("Admin: Users", body)
-
-@app.route("/admin/resets", methods=["GET","POST"])
-@login_required
-@role_required(ROLE_ADMIN)
-def admin_resets():
-    db=get_db(); cur=db.cursor()
-    if request.method=="POST":
-        rid=request.form.get("rid",""); newp=request.form.get("new","")
-        if rid.isdigit() and len(newp)>=4:
-            cur.execute("SELECT * FROM password_resets WHERE id=? AND state='open'", (int(rid),))
-            row=cur.fetchone()
-            if row:
-                cur.execute("UPDATE users SET passcode=? WHERE email=?", (generate_password_hash(newp),row["user_email"]))
-                cur.execute("""UPDATE password_resets SET state='resolved', resolved_at=?, resolver_id=?, new_passcode=? WHERE id=?""",
-                            (datetime.datetime.utcnow().isoformat(), current_user()["id"], None, int(rid)))
-                db.commit(); flash("Reset resolved and passcode updated.","message")
-            else:
-                flash("Reset not found or already resolved.","error")
-        else:
-            flash("Provide valid request ID and a new passcode (>=4 chars).","error")
-
-    cur.execute("SELECT * FROM password_resets ORDER BY created_at DESC")
-    rows=cur.fetchall(); db.close()
-    def tr(r):
-        return f"<tr><td>{r['id']}</td><td>{r['user_email']}</td><td>{r['state']}</td><td>{r['created_at'][:19].replace('T',' ')}</td><td>{r['resolved_at'][:19].replace('T',' ') if r['resolved_at'] else '-'}</td></tr>"
-    table="".join([tr(r) for r in rows]) or "<tr><td colspan=5>No requests</td></tr>"
-    body=f"""
-    <div class="card">
-      <h3>Password Reset Requests</h3>
-      <table><thead><tr><th>ID</th><th>Email</th><th>State</th><th>Created</th><th>Resolved</th></tr></thead>
-      <tbody>{table}</tbody></table>
-    </div>
-    <div class="card" style="max-width:560px">
-      <h3>Resolve a Request</h3>
-      <form method="post">
-        <label>Request ID</label><input name="rid" required>
-        <label>New Passcode</label><input name="new" required>
-        <div style="margin-top:10px"><button class="btn">Set New Passcode</button> <a class="btn light" href="{url_for('admin_users')}">Back</a></div>
-      </form>
-    </div>
-    """
-    return render_page("Admin: Reset Requests", body)
+    return render_page("Notifications", body)
 
 # ---------- Run ----------
 if __name__=="__main__":
