@@ -2,4 +2,4 @@ flask
 openpyxl
 gunicorn
 Flask-WTF
-sendgrid
+sendgrid==6.11.0
