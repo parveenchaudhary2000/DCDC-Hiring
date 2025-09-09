@@ -2,3 +2,4 @@ flask
 openpyxl
 gunicorn
 Flask-WTF
+sendgrid
