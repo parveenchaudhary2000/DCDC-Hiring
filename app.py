@@ -281,7 +281,7 @@ BASE_HTML = """
 <style>
 :root { --vein-blue:#0b5394; --artery-red:#b91c1c; --muted:#e5e7eb; --text:#0f172a; }
 body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:0;background:#fafafa;color:var(--text)}
-header{background:var(--vein-blue);color:#fff;padding:10px 12px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+header{background:var(--vein-blue);color:#fff;padding:10px 12px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;position:relative}
 header a{color:#e2e8f0;text-decoration:none;margin-right:12px}
 .brand{font-weight:800;display:flex;align-items:center;gap:10px}
 .brand img{height:28px;width:auto;display:block;border-radius:6px;background:#fff}
@@ -339,23 +339,25 @@ th,td{padding:8px;border-bottom:1px solid #eee;text-align:left}
       {% if user['role'] in ['admin'] %}
         <a href="{{ url_for('admin_users') }}">Admin</a>
       {% endif %}
-
-      {# --- Bell icon for manager/interviewer/hr (top-right) --- #}
-      {% if user['role'] in ['manager','interviewer','hr'] %}
-        <a href="{{ url_for('notifications') }}" class="bell-link" title="Notifications">
-          <span class="bell">🔔</span>
-          <span class="badge">{{ unread_notifications }}</span>
-        </a>
-      {% else %}
-        <a href="{{ url_for('notifications') }}">Notifications 🔔 <span class="badge">{{ unread_notifications }}</span></a>
-      {% endif %}
-
       <a href="{{ url_for('profile') }}">Profile</a>
       <a href="{{ url_for('logout') }}">Logout</a>
+
+      {# For non-manager/interviewer/hr roles, keep original Notifications link #}
+      {% if user['role'] not in ['manager','interviewer','hr'] %}
+        <a href="{{ url_for('notifications') }}">Notifications 🔔 <span class="badge">{{ unread_notifications }}</span></a>
+      {% endif %}
     {% else %}
       <a href="{{ url_for('login') }}">Login</a>
     {% endif %}
   </nav>
+
+  {# --- Bell icon top-right only for manager/interviewer/hr --- #}
+  {% if user and user['role'] in ['manager','interviewer','hr'] %}
+    <a href="{{ url_for('notifications') }}" class="bell-link" title="Notifications">
+      <span class="bell">🔔</span>
+      <span class="badge">{{ unread_notifications }}</span>
+    </a>
+  {% endif %}
 </header>
 
 <div class="wrap">
@@ -893,7 +895,7 @@ def add_candidate():
         ))
         db.commit(); db.close()
 
-        # --- NEW: Notify manager so they see which candidate is assigned to their role
+        # NEW: Notify manager (so bell shows candidates assigned to manager's role)
         if manager_id:
             notify(manager_id, "Candidate Assigned to Your Role",
                    f"{fields['full_name']} (ID {candidate_code}) assigned to your role.")
@@ -999,7 +1001,7 @@ def assign_candidate(candidate_id):
         cur.execute("UPDATE candidates SET interviewer_id=?, status='Assigned' WHERE id=?", (int(iid), candidate_id))
         db.commit(); db.close()
 
-        # Notifications: interviewer + candidate creator
+        # Notifications: interviewer + candidate creator (now include candidate ID)
         notify(int(iid), "New Candidate Assigned",
                f"{c['full_name']} / ID {c['candidate_code'] or '-'} ({c['post_applied']}) has been assigned to you.")
         if c["created_by"]:
@@ -1100,7 +1102,7 @@ def bulk_assign():
 
     cur.execute(f"UPDATE candidates SET interviewer_id=?, status='Assigned' WHERE id IN ({placeholders}){owner_guard}", params)
 
-    # Fetch details to include in the notification body (so interviewers see exactly which candidates)
+    # Fetch details to include in the notification body
     cur.execute(f"SELECT candidate_code, full_name, post_applied FROM candidates WHERE id IN ({placeholders})", ids)
     det_rows = cur.fetchall()
 
@@ -1244,7 +1246,7 @@ def bulk_upload():
                 ))
                 inserted+=1
 
-                # --- NEW: Notify manager for each inserted candidate
+                # NEW: Notify manager for each inserted candidate
                 if manager_id:
                     notify(manager_id, "Candidate Assigned to Your Role",
                            f"{full_name} (ID {cand_code}) assigned to your role.")
@@ -1324,12 +1326,12 @@ def finalize_candidate(candidate_id):
             db.close(); flash("Invalid action.","error"); return redirect(url_for("finalize_candidate",candidate_id=candidate_id))
         db.commit(); db.close()
 
-        # Notify HR creator + interviewer (if any) + manager (existing behavior)
+        # Existing notifications: HR creator + interviewer (if any) + manager
         for uid in filter(None, [c["created_by"], c["interviewer_id"], c["manager_owner"]]):
             notify(uid, "Candidate Finalized",
                    f"{c['full_name']} -> {action.upper()}. Remark: {(remark or '-')}")
 
-        # --- NEW: Notify ALL HRs for every selected/rejected candidate (with name + ID)
+        # NEW: Notify ALL HR users for selected/rejected with name + ID
         if action in ("select","reject"):
             title = "Candidate Selected" if action=="select" else "Candidate Rejected"
             msg = f"{c['full_name']} (ID {c['candidate_code'] or '-'}) was {('SELECTED' if action=='select' else 'REJECTED')} by manager."
