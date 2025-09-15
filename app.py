@@ -337,7 +337,7 @@ th,td{padding:8px;border-bottom:1px solid #eee;text-align:left}
   justify-content:center;
   width:28px;
   height:28px;
-  /* outline:2px solid #ff0; */ /* <- uncomment to debug position */
+  outline:2px solid #ff0;
 }
 .bell-link svg{
   display:block;
