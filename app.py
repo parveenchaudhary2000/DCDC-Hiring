@@ -281,7 +281,14 @@ BASE_HTML = """
 <style>
 :root { --vein-blue:#0b5394; --artery-red:#b91c1c; --muted:#e5e7eb; --text:#0f172a; }
 body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:0;background:#fafafa;color:var(--text)}
-header{background:var(--vein-blue);color:#fff;padding:10px 12px 10px 12px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;position:relative; padding-right:56px;}
+header{
+  background:var(--vein-blue);
+  color:#fff;
+  padding:10px 12px;             /* base padding */
+  padding-right:56px;            /* room for the bell */
+  display:flex;gap:12px;align-items:center;flex-wrap:wrap;
+  position:relative;             /* anchor for absolute bell */
+}
 header a{color:#e2e8f0;text-decoration:none;margin-right:12px}
 .brand{font-weight:800;display:flex;align-items:center;gap:10px}
 .brand img{height:28px;width:auto;display:block;border-radius:6px;background:#fff}
@@ -316,8 +323,6 @@ th,td{padding:8px;border-bottom:1px solid #eee;text-align:left}
 .section.blue{border-left-color:#0b53941a}
 .chip{display:inline-block;padding:4px 10px;border-radius:999px;background:#eef6ff;border:1px solid #dbeafe;color:#0b5394;margin-right:6px}
 
-
-<style>
 /* Notification bell positioning and badge */
 .bell-link{
   position:absolute;
@@ -332,7 +337,7 @@ th,td{padding:8px;border-bottom:1px solid #eee;text-align:left}
   justify-content:center;
   width:28px;
   height:28px;
-  outline:2px solid #ff0; /* DEBUG LINE */
+  /* outline:2px solid #ff0; */ /* <- uncomment to debug position */
 }
 .bell-link svg{
   display:block;
@@ -383,16 +388,15 @@ th,td{padding:8px;border-bottom:1px solid #eee;text-align:left}
   </nav>
 
   {% if user %}
-  <a href="{{ url_for('notifications') }}" class="bell-link" title="Notifications" aria-label="Notifications">
-    <!-- Solid bell SVG (currentColor replaced with explicit white via CSS) -->
-    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-      <path d="M12 2a5 5 0 0 0-5 5v2.09c0 .68-.27 1.34-.75 1.82L4.4 12.66A1.5 1.5 0 0 0 5.5 15h13a1.5 1.5 0 0 0 1.1-2.54l-1.85-1.85a2.58 2.58 0 0 1-.75-1.82V7a5 5 0 0 0-5-5Zm0 20a3 3 0 0 0 3-3H9a3 3 0 0 0 3 3Z"/>
-    </svg>
-    {% if (unread_notifications or 0)|int > 0 %}
-      <span class="notif-badge">{{ unread_notifications }}</span>
-    {% endif %}
-  </a>
-{% endif %}
+    <a href="{{ url_for('notifications') }}" class="bell-link" title="Notifications" aria-label="Notifications">
+      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <path d="M12 2a5 5 0 0 0-5 5v2.09c0 .68-.27 1.34-.75 1.82L4.4 12.66A1.5 1.5 0 0 0 5.5 15h13a1.5 1.5 0 0 0 1.1-2.54l-1.85-1.85a2.58 2.58 0 0 1-.75-1.82V7a5 5 0 0 0-5-5Zm0 20a3 3 0 0 0 3-3H9a3 3 0 0 0 3 3Z"/>
+      </svg>
+      {% if (unread_notifications or 0)|int > 0 %}
+        <span class="notif-badge">{{ unread_notifications }}</span>
+      {% endif %}
+    </a>
+  {% endif %}
 </header>
 
 <div class="wrap">
