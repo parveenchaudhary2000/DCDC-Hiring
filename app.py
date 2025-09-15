@@ -281,7 +281,7 @@ BASE_HTML = """
 <style>
 :root { --vein-blue:#0b5394; --artery-red:#b91c1c; --muted:#e5e7eb; --text:#0f172a; }
 body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:0;background:#fafafa;color:var(--text)}
-header{background:var(--vein-blue);color:#fff;padding:10px 12px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;position:relative}
+header{background:var(--vein-blue);color:#fff;padding:10px 12px 10px 12px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;position:relative; padding-right:56px;}
 header a{color:#e2e8f0;text-decoration:none;margin-right:12px}
 .brand{font-weight:800;display:flex;align-items:center;gap:10px}
 .brand img{height:28px;width:auto;display:block;border-radius:6px;background:#fff}
@@ -320,21 +320,36 @@ th,td{padding:8px;border-bottom:1px solid #eee;text-align:left}
 .bell-link{
   position:absolute;
   right:12px;
-  top:10px;
+  top:50%;
+  transform:translateY(-50%);
   text-decoration:none;
-  font-size:22px;
   line-height:1;
+  z-index:10;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  width:28px;
+  height:28px;
+}
+.bell-link svg{
+  display:block;
+  width:22px;
+  height:22px;
+  fill:#ffffff; /* ensure visible on dark header */
 }
 .notif-badge{
   position:absolute;
   top:-6px;
-  right:-10px;
+  right:-8px;
   background:#ef4444;
   color:#fff;
   border-radius:999px;
   padding:0 6px;
   font-size:12px;
   border:2px solid #fff;
+  line-height:18px;
+  min-width:18px;
+  text-align:center;
 }
 </style>
 </head>
@@ -365,13 +380,16 @@ th,td{padding:8px;border-bottom:1px solid #eee;text-align:left}
   </nav>
 
   {% if user %}
-    <a href="{{ url_for('notifications') }}" class="bell-link" title="Notifications">
-      <span class="bell">🔔</span>
-      {% if (unread_notifications or 0)|int > 0 %}
-        <span class="notif-badge">{{ unread_notifications }}</span>
-      {% endif %}
-    </a>
-  {% endif %}
+  <a href="{{ url_for('notifications') }}" class="bell-link" title="Notifications" aria-label="Notifications">
+    <!-- Solid bell SVG (currentColor replaced with explicit white via CSS) -->
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M12 2a5 5 0 0 0-5 5v2.09c0 .68-.27 1.34-.75 1.82L4.4 12.66A1.5 1.5 0 0 0 5.5 15h13a1.5 1.5 0 0 0 1.1-2.54l-1.85-1.85a2.58 2.58 0 0 1-.75-1.82V7a5 5 0 0 0-5-5Zm0 20a3 3 0 0 0 3-3H9a3 3 0 0 0 3 3Z"/>
+    </svg>
+    {% if (unread_notifications or 0)|int > 0 %}
+      <span class="notif-badge">{{ unread_notifications }}</span>
+    {% endif %}
+  </a>
+{% endif %}
 </header>
 
 <div class="wrap">
