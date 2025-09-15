@@ -316,6 +316,8 @@ th,td{padding:8px;border-bottom:1px solid #eee;text-align:left}
 .section.blue{border-left-color:#0b53941a}
 .chip{display:inline-block;padding:4px 10px;border-radius:999px;background:#eef6ff;border:1px solid #dbeafe;color:#0b5394;margin-right:6px}
 
+
+<style>
 /* Notification bell positioning and badge */
 .bell-link{
   position:absolute;
@@ -330,6 +332,7 @@ th,td{padding:8px;border-bottom:1px solid #eee;text-align:left}
   justify-content:center;
   width:28px;
   height:28px;
+  outline:2px solid #ff0; /* DEBUG LINE */
 }
 .bell-link svg{
   display:block;
