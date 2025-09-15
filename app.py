@@ -403,6 +403,16 @@ def brand_logo():
     from flask import Response
     return Response(b"GIF89a\x01\x00\x01\x00\x80\x00\x00\xff\xff\xff\x00\x00\x00!\xf9\x04\x01\n\x00\x01\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;", mimetype="image/gif")
 
+@app.route("/__unread")
+def __unread():
+    u = current_user()
+    n = 0
+    if u:
+        db = get_db(); cur = db.cursor()
+        cur.execute("SELECT COUNT(*) FROM notifications WHERE user_id=? AND is_read=0", (u["id"],))
+        n = cur.fetchone()[0] or 0
+        db.close()
+    return f"<pre>logged_in={bool(u)} role={u['role'] if u else '-'} unread={n}</pre>"
 # ---------- Auth ----------
 
 @app.route("/login", methods=["GET","POST"])
