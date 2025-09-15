@@ -270,7 +270,7 @@ def inject_unread():
         db.close()
     return dict(unread_notifications=n)
 
-# ---------- UI ----------
+# ---------- UI (FIXED HEADER + BELL) ----------
 
 BASE_HTML = """
 <!doctype html>
@@ -316,35 +316,35 @@ th,td{padding:8px;border-bottom:1px solid #eee;text-align:left}
 .section.blue{border-left-color:#0b53941a}
 .chip{display:inline-block;padding:4px 10px;border-radius:999px;background:#eef6ff;border:1px solid #dbeafe;color:#0b5394;margin-right:6px}
 
-{% if user and user['role'] in ['manager','interviewer','hr'] %}
-  <a class="notif-bell" href="{{ url_for('notifications') }}" title="Notifications">
-    🔔
-    {% if (unread_notifications or 0)|int > 0 %}
-      <span class="notif-badge">{{ unread_notifications }}</span>
-    {% endif %}
-  </a>
-{% endif %}
-
-<div class="wrap">
-{% with messages = get_flashed_messages(with_categories=true) %}
-  {% if messages %}
-    {% for cat, msg in messages %}
-      <div class="flash {{ 'ok' if cat=='message' else cat }}">{{ msg }}</div>
-    {% endfor %}
-  {% endif %}
-{% endwith %}
-
-{{ body|safe }}
-
-</div>
-</body>
-</html>
-"""
-
+/* Notification bell positioning and badge */
+.bell-link{
+  position:absolute;
+  right:12px;
+  top:10px;
+  text-decoration:none;
+  font-size:22px;
+  line-height:1;
+}
+.notif-badge{
+  position:absolute;
+  top:-6px;
+  right:-10px;
+  background:#ef4444;
+  color:#fff;
+  border-radius:999px;
+  padding:0 6px;
+  font-size:12px;
+  border:2px solid #fff;
+}
+</style>
+</head>
+<body>
+<header>
   <div class="brand">
     <img src="{{ url_for('brand_logo') }}" alt="logo" onerror="this.style.display='none'">
     <div>{{ app_title }}</div>
   </div>
+
   <nav class="nav">
     {% if user %}
       <a href="{{ url_for('dashboard') }}">Dashboard</a>
@@ -352,8 +352,6 @@ th,td{padding:8px;border-bottom:1px solid #eee;text-align:left}
       {% if user['role'] in ['hr','admin'] %}
         <a href="{{ url_for('add_candidate') }}">Add Candidate</a>
         <a href="{{ url_for('bulk_upload') }}">Bulk Upload</a>
-      {% endif %}
-      {% if user['role'] in ['hr','admin'] %}
         <a href="{{ url_for('hr_join_queue') }}">HR Actions</a>
       {% endif %}
       {% if user['role'] in ['admin'] %}
@@ -361,27 +359,17 @@ th,td{padding:8px;border-bottom:1px solid #eee;text-align:left}
       {% endif %}
       <a href="{{ url_for('profile') }}">Profile</a>
       <a href="{{ url_for('logout') }}">Logout</a>
-
-      {# For non-manager/interviewer/hr roles, keep original Notifications link #}
-      {% if user['role'] not in ['manager','interviewer','hr'] %}
-        <a href="{{ url_for('notifications') }}" class="notif-bell">
-            🔔
-            {% if unread_notifications > 0 %}
-            <span class="notif-badge">{{ unread_notifications }}</span>
-            {% endif %}
-        </a>
-
-      {% endif %}
     {% else %}
       <a href="{{ url_for('login') }}">Login</a>
     {% endif %}
   </nav>
 
-  {# --- Bell icon top-right only for manager/interviewer/hr --- #}
-  {% if user and user['role'] in ['manager','interviewer','hr'] %}
+  {% if user %}
     <a href="{{ url_for('notifications') }}" class="bell-link" title="Notifications">
       <span class="bell">🔔</span>
-      <span class="badge">{{ unread_notifications }}</span>
+      {% if (unread_notifications or 0)|int > 0 %}
+        <span class="notif-badge">{{ unread_notifications }}</span>
+      {% endif %}
     </a>
   {% endif %}
 </header>
@@ -390,7 +378,7 @@ th,td{padding:8px;border-bottom:1px solid #eee;text-align:left}
 {% with messages = get_flashed_messages(with_categories=true) %}
   {% if messages %}
     {% for cat, msg in messages %}
-    <div class="flash {{ 'ok' if cat=='message' else cat }}">{{ msg }}</div>
+      <div class="flash {{ 'ok' if cat=='message' else cat }}">{{ msg }}</div>
     {% endfor %}
   {% endif %}
 {% endwith %}
