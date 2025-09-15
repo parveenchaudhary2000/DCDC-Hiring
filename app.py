@@ -316,69 +316,65 @@ th,td{padding:8px;border-bottom:1px solid #eee;text-align:left}
 .section.blue{border-left-color:#0b53941a}
 .chip{display:inline-block;padding:4px 10px;border-radius:999px;background:#eef6ff;border:1px solid #dbeafe;color:#0b5394;margin-right:6px}
 
-/* 🔔 Notification bell styles */
-.notif-bell {
-    position: relative;
-    font-size: 22px;
-    margin-left: auto;
-    text-decoration: none;
-    color: #fff;
-}
-.notif-badge {
-    position: absolute;
-    top: -6px;
-    right: -10px;
-    background: #dc2626; /* red */
-    color: #fff;
-    border-radius: 999px;
-    padding: 2px 6px;
-    font-size: 12px;
-    font-weight: 700;
-}
+/* 🔔 Notification bell */
+.notif-bell{position:relative;margin-left:auto;font-size:22px;text-decoration:none;color:#e2e8f0}
+.notif-badge{position:absolute;top:-6px;right:-10px;background:#dc2626;color:#fff;border-radius:999px;padding:2px 6px;font-size:12px;font-weight:700}
 </style>
 </head>
 <body>
 <header>
-    <div class="brand">
-        <img src="{{ url_for('logo') }}" alt="logo">
-        <span>Hiring Management</span>
-    </div>
-    <nav class="nav">
-        <a href="{{ url_for('index') }}">Dashboard</a>
-        <a href="{{ url_for('candidates') }}">Candidates</a>
-        {% if current_user and current_user['role'] == 'hr' %}
-        <a href="{{ url_for('hr_queue') }}">HR Actions</a>
-        {% endif %}
-        {% if current_user and current_user['role'] == 'admin' %}
-        <a href="{{ url_for('admin_users') }}">Admin</a>
-        {% endif %}
-        <a href="{{ url_for('profile') }}">Profile</a>
-        <a href="{{ url_for('logout') }}">Logout</a>
-    </nav>
+  <div class="brand">
+    <img src="{{ url_for('brand_logo') }}" alt="logo" onerror="this.style.display='none'">
+    <div>{{ app_title }}</div>
+  </div>
 
-    {% if current_user and current_user['role'] in ['manager','interviewer','hr'] %}
-    <a href="{{ url_for('notifications') }}" class="notif-bell">
-        🔔
-        {% if unread_notifications > 0 %}
-        <span class="notif-badge">{{ unread_notifications }}</span>
-        {% endif %}
-    </a>
+  <nav class="nav">
+    {% if user %}
+      <a href="{{ url_for('dashboard') }}">Dashboard</a>
+      <a href="{{ url_for('candidates_all') }}">Candidates</a>
+      {% if user['role'] in ['hr','admin'] %}
+        <a href="{{ url_for('add_candidate') }}">Add Candidate</a>
+        <a href="{{ url_for('bulk_upload') }}">Bulk Upload</a>
+      {% endif %}
+      {% if user['role'] in ['hr','admin'] %}
+        <a href="{{ url_for('hr_join_queue') }}">HR Actions</a>
+      {% endif %}
+      {% if user['role'] in ['admin'] %}
+        <a href="{{ url_for('admin_users') }}">Admin</a>
+      {% endif %}
+      <a href="{{ url_for('profile') }}">Profile</a>
+      <a href="{{ url_for('logout') }}">Logout</a>
+    {% else %}
+      <a href="{{ url_for('login') }}">Login</a>
     {% endif %}
+  </nav>
+
+  {% if user and user['role'] in ['manager','interviewer','hr'] %}
+    <a class="notif-bell" href="{{ url_for('notifications') }}" title="Notifications">
+      🔔
+      {% if (unread_notifications or 0)|int > 0 %}
+        <span class="notif-badge">{{ unread_notifications }}</span>
+      {% endif %}
+    </a>
+  {% endif %}
 </header>
 
 <div class="wrap">
-    {% with messages = get_flashed_messages(with_categories=true) %}
-    {% if messages %}
-        {% for category, message in messages %}
-            <div class="flash {{ category }}">{{ message }}</div>
-        {% endfor %}
-    {% endif %}
-    {% endwith %}
-    {{ body|safe }}
+{% with messages = get_flashed_messages(with_categories=true) %}
+  {% if messages %}
+    {% for cat, msg in messages %}
+      <div class="flash {{ 'ok' if cat=='message' else cat }}">{{ msg }}</div>
+    {% endfor %}
+  {% endif %}
+{% endwith %}
+
+{{ body|safe }}
+
 </div>
 </body>
 </html>
 """
+
   <div class="brand">
     <img src="{{ url_for('brand_logo') }}" alt="logo" onerror="this.style.display='none'">
     <div>{{ app_title }}</div>
