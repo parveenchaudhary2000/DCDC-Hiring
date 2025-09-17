@@ -496,7 +496,7 @@ def brand_logo():
 # version probe (to confirm the new build is running)
 @app.route("/__version")
 def __version():
-    return f"HMS build: {BUILD_TAG}"
+    return f"HMS build: HMS-2025-09-17-bell-subnav-remarks-v3"
 
 @app.route("/__unread")
 @login_required
