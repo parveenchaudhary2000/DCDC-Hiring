@@ -141,6 +141,7 @@ def init_db():
       hr_joined_at TEXT
     );""")
 
+    # interviews table includes editable audit fields
     c.execute("""
     CREATE TABLE IF NOT EXISTS interviews(
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -150,7 +151,14 @@ def init_db():
       rating INTEGER,
       decision TEXT,
       is_reinterview INTEGER DEFAULT 0,
-      created_at TEXT NOT NULL
+      created_at TEXT NOT NULL,
+      -- audit for edits
+      prev_feedback TEXT,
+      prev_rating INTEGER,
+      prev_decision TEXT,
+      is_edited INTEGER DEFAULT 0,
+      edited_at TEXT,
+      edited_by INTEGER
     );""")
 
     # NEW: notifications
@@ -164,6 +172,7 @@ def init_db():
       created_at TEXT NOT NULL
     );""")
 
+    # Seed users if empty
     c.execute("SELECT COUNT(*) AS ct FROM users")
     if c.fetchone()["ct"] == 0:
         now = datetime.datetime.utcnow().isoformat()
@@ -212,8 +221,24 @@ def init_db():
     c.execute("CREATE INDEX IF NOT EXISTS idx_cand_interviewer   ON candidates(interviewer_id)")
     c.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_cand_code_nonnull ON candidates(candidate_code) WHERE candidate_code IS NOT NULL")
 
-    conn.commit()
-    conn.close()
+    conn.commit(); conn.close()
+
+    # Lightweight migration for existing DBs to add new audit columns
+    migrate_db()
+
+def migrate_db():
+    conn = get_db(); c = conn.cursor()
+    c.execute("PRAGMA table_info(interviews)")
+    cols = {row[1] for row in c.fetchall()}
+    def addcol(name, type_sql):
+        c.execute(f"ALTER TABLE interviews ADD COLUMN {name} {type_sql}")
+    if "prev_feedback" not in cols: addcol("prev_feedback","TEXT")
+    if "prev_rating"   not in cols: addcol("prev_rating","INTEGER")
+    if "prev_decision" not in cols: addcol("prev_decision","TEXT")
+    if "is_edited"     not in cols: addcol("is_edited","INTEGER DEFAULT 0")
+    if "edited_at"     not in cols: addcol("edited_at","TEXT")
+    if "edited_by"     not in cols: addcol("edited_by","INTEGER")
+    conn.commit(); conn.close()
 
 def user_id_by_email(email:str):
     db=get_db(); cur=db.cursor()
@@ -280,6 +305,19 @@ def all_interviewers():
     cur.execute("SELECT id,name FROM users WHERE role='interviewer' ORDER BY name")
     rows = cur.fetchall(); db.close()
     return rows
+
+def candidate_role_scope_where(u):
+    """
+    Returns (where_sql, args) for candidate queries, respecting the user's role/scope.
+    """
+    if u["role"] in (ROLE_ADMIN, ROLE_VP) or (u["role"]==ROLE_HR and is_hr_head(u)):
+        return "1=1", []
+    elif u["role"] == ROLE_HR:
+        return "created_by=?", [u["id"]]
+    elif u["role"] == ROLE_MANAGER:
+        return "manager_owner=?", [u["id"]]
+    else:
+        return "interviewer_id=?", [u["id"]]
 
 # unread notifications badge
 @app.context_processor
@@ -363,6 +401,9 @@ th,td{padding:8px;border-bottom:1px solid #eee;text-align:left}
   min-width:18px;
   text-align:center;
 }
+.subnav{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0}
+.subnav a{border:1px solid #dbeafe;background:#eff6ff;color:#0b5394;padding:6px 10px;border-radius:999px;text-decoration:none}
+.subnav a.active{background:#0b5394;color:#fff}
 </style>
 </head>
 <body>
@@ -415,6 +456,35 @@ th,td{padding:8px;border-bottom:1px solid #eee;text-align:left}
 {{ body|safe }}
 
 </div>
+
+<!-- Bell auto-refresh every 30s -->
+<script>
+(function(){
+  function updateBell(){
+    fetch("{{ url_for('__unread') }}", {cache: 'no-store'})
+      .then(r => r.text())
+      .then(t => {
+        var m = t.match(/unread=(\d+)/);
+        var n = m ? parseInt(m[1], 10) : 0;
+        var link = document.querySelector('.bell-link');
+        if(!link) return;
+        var badge = link.querySelector('.bell-badge');
+        if(!badge && n>0){
+          badge = document.createElement('span');
+          badge.className = 'bell-badge';
+          link.appendChild(badge);
+        }
+        if(badge){
+          if(n>0){ badge.textContent = n; badge.style.display='inline-block'; }
+          else{ badge.style.display='none'; }
+        }
+      })
+      .catch(()=>{});
+  }
+  setInterval(updateBell, 30000); // 30s
+})();
+</script>
+
 </body>
 </html>
 """
@@ -814,21 +884,61 @@ def mark_all_notif_read():
     db.commit(); db.close()
     return redirect(url_for('notifications'))
 
-# ---------- Candidates ----------
+# ---------- Candidates (Search, Pagination, Manager Sub-pages by Post) ----------
 
 @app.route("/candidates")
 @login_required
 def candidates_all():
-    u=current_user(); db=get_db(); cur=db.cursor()
-    if u["role"] in (ROLE_ADMIN,ROLE_VP) or (u["role"]==ROLE_HR and is_hr_head(u)):
-        cur.execute("SELECT * FROM candidates ORDER BY created_at DESC")
-    elif u["role"]==ROLE_HR:
-        cur.execute("SELECT * FROM candidates WHERE created_by=? ORDER BY created_at DESC",(u["id"],))
-    elif u["role"]==ROLE_MANAGER:
-        cur.execute("SELECT * FROM candidates WHERE manager_owner=? ORDER BY created_at DESC",(u["id"],))
-    else:
-        cur.execute("SELECT * FROM candidates WHERE interviewer_id=? ORDER BY created_at DESC",(u["id"],))
-    rows = cur.fetchall(); db.close()
+    u = current_user(); db = get_db(); cur = db.cursor()
+
+    # Search, post filter & pagination
+    q = (request.args.get("q") or "").strip()
+    post_filter = (request.args.get("post_filter") or "").strip()
+    try:
+        per_page = max(5, min(100, int(request.args.get("per_page", "25"))))
+    except:
+        per_page = 25
+    try:
+        page = max(1, int(request.args.get("page", "1")))
+    except:
+        page = 1
+    offset = (page - 1) * per_page
+
+    # Role scope
+    base_where, args = candidate_role_scope_where(u)
+
+    # Manager subnav posts list (only for managers)
+    posts = []
+    if u["role"] == ROLE_MANAGER:
+        cur.execute(f"SELECT DISTINCT post_applied FROM candidates WHERE {base_where} AND IFNULL(post_applied,'')<>'' ORDER BY post_applied", args)
+        posts = [r[0] for r in cur.fetchall()]
+
+    # Build WHERE with search and optional post filter
+    where = base_where
+    if post_filter:
+        where += " AND post_applied=?"; args = args + [post_filter]
+    search_sql = ""
+    if q:
+        search_sql = " AND (full_name LIKE ? OR email LIKE ? OR phone LIKE ? OR candidate_code LIKE ? OR post_applied LIKE ? OR current_previous_company LIKE ?)"
+        wild = f"%{q}%"
+        args += [wild, wild, wild, wild, wild, wild]
+
+    # Count for pagination
+    cur.execute(f"SELECT COUNT(*) FROM candidates WHERE {where}{search_sql}", args)
+    total = cur.fetchone()[0] or 0
+
+    # Fetch paginated rows
+    cur.execute(f"""
+      SELECT *
+      FROM candidates
+      WHERE {where}{search_sql}
+      ORDER BY datetime(created_at) DESC
+      LIMIT ? OFFSET ?
+    """, args + [per_page, offset])
+    rows = cur.fetchall()
+    db.close()
+
+    pages = (total + per_page - 1) // per_page
 
     def actions(r):
         role = current_user()['role']
@@ -843,13 +953,15 @@ def candidates_all():
     if current_user()['role'] in (ROLE_MANAGER, ROLE_ADMIN):
         header_action = f"<div style='margin-bottom:10px'><a class='btn' href='{url_for('bulk_assign')}'>Bulk Assign</a></div>"
 
+    # Build table rows
     rows_html_list = []
     for r in rows:
         cv_html = f'<a href="{url_for("download_cv", path=r["cv_path"])}">CV</a>' if r['cv_path'] else '-'
+        detail_link = f"<a href='{url_for('candidate_detail', candidate_id=r['id'])}'>{r['full_name']}</a>"
         rows_html_list.append(
             f"<tr>"
             f"<td>{r['candidate_code'] or '-'}</td>"
-            f"<td>{r['full_name']}</td>"
+            f"<td>{detail_link}</td>"
             f"<td>{r['post_applied']}</td>"
             f"<td><span class='tag'>{r['status']}</span></td>"
             f"<td>{r['final_decision'] or '-'}</td>"
@@ -861,28 +973,164 @@ def candidates_all():
         )
     rows_html = "".join(rows_html_list) or "<tr><td colspan=9>No data</td></tr>"
 
+    # Pagination controls
+    qkeep = f"&q={q}" if q else ""
+    qkeep += f"&per_page={per_page}"
+    if post_filter:
+        qkeep += f"&post_filter={post_filter}"
+    prev_url = url_for('candidates_all') + f"?page={page-1}{qkeep}" if page>1 else None
+    next_url = url_for('candidates_all') + f"?page={page+1}{qkeep}" if page<pages else None
+    showing_from = offset+1 if total else 0
+    showing_to = min(offset+per_page, total)
+
+    # Export link (keeps search & post)
+    export_url = url_for('export_candidates') + (f"?q={q}" if q else "")
+    if post_filter:
+        export_url += ("&" if "?" in export_url else "?") + f"post_filter={post_filter}"
+
+    # Manager subnav (posts as sub-pages)
+    subnav = ""
+    if posts:
+        chips = [f"<a href='{url_for('candidates_all')}' class='{'active' if not post_filter else ''}'>All</a>"]
+        for p in posts:
+            active = "active" if p == post_filter else ""
+            chips.append(f"<a href='{url_for('candidates_all')}?post_filter={p}' class='{active}'>{p}</a>")
+        subnav = "<div class='subnav'>" + " ".join(chips) + "</div>"
+
     body = f"""
     <div class="card"><h3>All Candidates</h3>
-    {header_action}
-    <table>
-      <thead>
-        <tr>
-          <th>Candidate ID</th>
-          <th>Name</th>
-          <th>Post</th>
-          <th>Status</th>
-          <th>Final</th>
-          <th>HR Join</th>
-          <th>Created</th>
-          <th>CV</th>
-          <th>Actions</th>
-        </tr>
-      </thead>
-      <tbody>{rows_html}</tbody>
-    </table>
+      {subnav}
+      <form method="get" style="margin-bottom:10px; display:flex; gap:8px; flex-wrap:wrap">
+        <input name="q" value="{q}" placeholder="Search name/email/phone/ID/post/company" style="flex:1; min-width:280px">
+        <input type="hidden" name="post_filter" value="{post_filter}">
+        <select name="per_page">
+          {''.join([f"<option value='{n}' {'selected' if per_page==n else ''}>{n}/page</option>" for n in (10,25,50,100)])}
+        </select>
+        <button class="btn">Search</button>
+        <a class="btn light" href="{url_for('candidates_all')}">Clear</a>
+        <a class="btn" href="{export_url}">Export XLSX</a>
+      </form>
+      {header_action}
+      <table>
+        <thead>
+          <tr>
+            <th>Candidate ID</th>
+            <th>Name</th>
+            <th>Post</th>
+            <th>Status</th>
+            <th>Final</th>
+            <th>HR Join</th>
+            <th>Created</th>
+            <th>CV</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>{rows_html}</tbody>
+      </table>
+      <div style="display:flex;align-items:center;gap:10px;justify-content:space-between;margin-top:10px">
+        <div class="tag">Showing {showing_from}-{showing_to} of {total}</div>
+        <div style="display:flex;gap:8px">
+          {'<a class="btn light" href="'+prev_url+'">← Prev</a>' if prev_url else '<span class="btn light" style="opacity:.5;pointer-events:none">← Prev</span>'}
+          <span class="tag">Page {page} / {pages or 1}</span>
+          {'<a class="btn light" href="'+next_url+'">Next →</a>' if next_url else '<span class="btn light" style="opacity:.5;pointer-events:none">Next →</span>'}
+        </div>
+      </div>
     </div>
     """
     return render_page("Candidates", body)
+
+@app.route("/candidate/<int:candidate_id>")
+@login_required
+def candidate_detail(candidate_id):
+    u = current_user(); db = get_db(); cur = db.cursor()
+
+    cur.execute("SELECT * FROM candidates WHERE id=?", (candidate_id,))
+    c = cur.fetchone()
+    if not c:
+        db.close(); flash("Candidate not found.","error"); return redirect(url_for("candidates_all"))
+
+    # Enforce role scope
+    scope_where, scope_args = candidate_role_scope_where(u)
+    cur.execute(f"SELECT 1 FROM candidates WHERE id=? AND {scope_where}", [candidate_id]+scope_args)
+    ok = cur.fetchone()
+    if not ok:
+        db.close(); flash("You do not have access to this candidate.","error"); return redirect(url_for("candidates_all"))
+
+    # Interviews
+    cur.execute("""
+      SELECT i.*, u.name AS interviewer_name
+      FROM interviews i
+      LEFT JOIN users u ON u.id = i.interviewer_id
+      WHERE i.candidate_id=?
+      ORDER BY i.id DESC
+    """, (candidate_id,))
+    ivs = cur.fetchall(); db.close()
+
+    cv_html = f'<a class="btn light" href="{url_for("download_cv", path=c["cv_path"])}">Download CV</a>' if c["cv_path"] else "<span class='tag'>No CV</span>"
+
+    # Context actions
+    acts = []
+    if u["role"] in (ROLE_MANAGER, ROLE_ADMIN):
+        acts.append(f"<a class='btn light' href='{url_for('assign_candidate', candidate_id=c['id'])}'>Assign</a>")
+        acts.append(f"<a class='btn' href='{url_for('finalize_candidate', candidate_id=c['id'])}'>Finalize</a>")
+    if u["role"] == ROLE_INTERVIEWER and c["interviewer_id"] == u["id"]:
+        acts.append(f"<a class='btn' href='{url_for('interview_feedback', candidate_id=c['id'])}'>Submit / Edit Feedback</a>")
+    if u["role"] in (ROLE_HR, ROLE_ADMIN) and c["status"]=='finalized' and (c["final_decision"] or '').lower()=='selected' and not c["hr_join_status"]:
+        acts.append(f"<a class='btn' href='{url_for('hr_join_update', candidate_id=c['id'])}'>Mark Join</a>")
+    actions_html = (" ".join(acts)) if acts else "<span class='tag'>No actions</span>"
+
+    if not ivs:
+        iv_html = "<p>No interviews yet.</p>"
+    else:
+        iv_rows = "".join([
+            f"<tr><td>{(iv['created_at'] or '')[:19].replace('T',' ')}</td>"
+            f"<td>{iv['interviewer_name'] or '-'}</td>"
+            f"<td>{iv['rating'] or '-'}</td>"
+            f"<td>{iv['decision']}</td>"
+            f"<td style='white-space:pre-wrap'>{(iv['feedback'] or '').strip() or '-'}</td>"
+            f"<td>{'Yes' if iv['is_edited'] else 'No'}</td>"
+            f"<td>{iv['prev_decision'] or '-'}</td>"
+            f"<td style='white-space:pre-wrap'>{(iv['prev_feedback'] or '').strip() or '-'}</td>"
+            f"</tr>"
+            for iv in ivs
+        ])
+        iv_html = f"""
+        <table>
+          <thead><tr><th>Time</th><th>Interviewer</th><th>Rating</th><th>Decision</th><th>Feedback</th><th>Edited?</th><th>Prev Decision</th><th>Prev Feedback</th></tr></thead>
+          <tbody>{iv_rows}</tbody>
+        </table>
+        """
+
+    body = f"""
+    <div class="card">
+      <h3>Candidate Details</h3>
+      <div class="row">
+        <div class="col">
+          <p><strong>{c['full_name']}</strong> — <span class="tag">{c['post_applied']}</span></p>
+          <p><span class="tag">ID: {c['candidate_code'] or '-'}</span> <span class="tag">Status: {c['status']}</span> <span class="tag">Final: {c['final_decision'] or '-'}</span> <span class="tag">HR Join: {c['hr_join_status'] or '-'}</span></p>
+          <p>Email: {c['email'] or '-'}<br>Phone: {c['phone'] or '-'}<br>Qualification: {c['qualification'] or '-'}</p>
+          <p>Experience: {c['experience_years'] or '-'} years<br>Designation: {c['current_designation'] or '-'}</p>
+          <p>Company: {c['current_previous_company'] or '-'}</p>
+          <p>Current Location: {c['current_location'] or '-'}<br>Preferred: {c['preferred_location'] or '-'}</p>
+          <p>Region: {c['assigned_region'] or '-'}</p>
+          <p>Created: {(c['created_at'] or '')[:19].replace('T',' ')}{f"<br>Interview Date: {c['interview_date']}" if c['interview_date'] else ''}</p>
+          <p>{cv_html}</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Interviews</h3>
+      {iv_html}
+    </div>
+
+    <div class="card">
+      <h3>Actions</h3>
+      {actions_html}
+      <div style="margin-top:10px"><a class="btn light" href="{url_for('candidates_all')}">Back</a></div>
+    </div>
+    """
+    return render_page("Candidate", body)
 
 @app.route("/cv/<path:path>")
 @login_required
@@ -891,6 +1139,60 @@ def download_cv(path):
     if not full.startswith(os.path.abspath(UPLOAD_DIR)) or not os.path.exists(full):
         flash("File not found.","error"); return redirect(url_for("candidates_all"))
     return send_from_directory(UPLOAD_DIR, os.path.basename(full), as_attachment=True)
+
+# ---------- Export ----------
+
+@app.route("/export/candidates.xlsx")
+@login_required
+def export_candidates():
+    u = current_user(); db = get_db(); cur = db.cursor()
+
+    q = (request.args.get("q") or "").strip()
+    post_filter = (request.args.get("post_filter") or "").strip()
+
+    where, args = candidate_role_scope_where(u)
+    if post_filter:
+        where += " AND post_applied=?"; args += [post_filter]
+    if q:
+        where += " AND (full_name LIKE ? OR email LIKE ? OR phone LIKE ? OR candidate_code LIKE ? OR post_applied LIKE ? OR current_previous_company LIKE ?)"
+        wild = f"%{q}%"
+        args += [wild, wild, wild, wild, wild, wild]
+
+    cur.execute(f"""
+      SELECT candidate_code, full_name, post_applied, status, final_decision, hr_join_status,
+             created_at, email, phone, qualification, experience_years, current_designation,
+             current_previous_company, assigned_region, current_location, preferred_location
+      FROM candidates
+      WHERE {where}
+      ORDER BY datetime(created_at) DESC
+    """, args)
+    rows = cur.fetchall(); db.close()
+
+    wb = Workbook(); ws = wb.active; ws.title = "Candidates"
+    headers = ["Candidate ID","Name","Post","Status","Final","HR Join","Created",
+               "Email","Phone","Qualification","Experience (years)","Current designation",
+               "Current/Previous company","Region","Current Location","Preferred Location"]
+    ws.append(headers)
+    for r in rows:
+        ws.append([
+            r["candidate_code"] or "-", r["full_name"], r["post_applied"], r["status"],
+            r["final_decision"] or "-", r["hr_join_status"] or "-",
+            (r["created_at"] or "")[:19].replace("T"," "),
+            r["email"] or "-", r["phone"] or "-", r["qualification"] or "-",
+            r["experience_years"] or "-", r["current_designation"] or "-",
+            r["current_previous_company"] or "-", r["assigned_region"] or "-",
+            r["current_location"] or "-", r["preferred_location"] or "-"
+        ])
+
+    bio = io.BytesIO(); wb.save(bio); bio.seek(0)
+    base = "candidates"
+    if post_filter:
+        base += "_" + re.sub(r"\W+","_", post_filter).strip("_")
+    if q:
+        base += "_" + re.sub(r"\W+","_", q)[:30].strip("_")
+    fname = base + ".xlsx"
+    return send_file(bio, as_attachment=True, download_name=fname,
+                     mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 # ---------- Add Candidate ----------
 
@@ -968,7 +1270,7 @@ def add_candidate():
             cur.execute("UPDATE candidates SET candidate_code=? WHERE id=?", (candidate_code, cid))
         db.commit(); db.close()
 
-        # NEW: Notify manager (so bell shows candidates assigned to manager's role)
+        # Notify manager (so bell shows candidates assigned to manager's role)
         if manager_id:
             notify(manager_id, "Candidate Assigned to Your Role",
                    f"{fields['full_name']} (ID {candidate_code}) assigned to your role.")
@@ -1074,7 +1376,7 @@ def assign_candidate(candidate_id):
         cur.execute("UPDATE candidates SET interviewer_id=?, status='Assigned' WHERE id=?", (int(iid), candidate_id))
         db.commit(); db.close()
 
-        # Notifications: interviewer + candidate creator (now include candidate ID)
+        # Notifications: interviewer + candidate creator + manager (already sees)
         notify(int(iid), "New Candidate Assigned",
                f"{c['full_name']} / ID {c['candidate_code'] or '-'} ({c['post_applied']}) has been assigned to you.")
         if c["created_by"]:
@@ -1148,7 +1450,10 @@ def bulk_assign():
 
             <table>
               <thead>
-                <tr><th></th><th>ID</th><th>Name</th><th>Post</th><th>Status</th><th>Current Interviewer</th></tr>
+                <tr>
+                  <th><input type='checkbox' id='selAll' onclick='toggleAll(this)'></th>
+                  <th>ID</th><th>Name</th><th>Post</th><th>Status</th><th>Current Interviewer</th>
+                </tr>
               </thead>
               <tbody>{trs}</tbody>
             </table>
@@ -1159,6 +1464,11 @@ def bulk_assign():
             </div>
           </form>
         </div>
+        <script>
+        function toggleAll(cb){
+          document.querySelectorAll("input[name='ids']").forEach(el => {{ el.checked = cb.checked; }});
+        }
+        </script>
         """
         db.close(); return render_page("Bulk Assign", body)
 
@@ -1187,7 +1497,7 @@ def bulk_assign():
     flash("Candidates assigned.","message")
     return redirect(url_for("candidates_all"))
 
-# ---------- Interviewer: feedback / decision (to manager) ----------
+# ---------- Interviewer: feedback (new + editable with audit) ----------
 
 @app.route("/interview/<int:candidate_id>", methods=["GET","POST"])
 @login_required
@@ -1198,7 +1508,13 @@ def interview_feedback(candidate_id):
     if not c or c["interviewer_id"]!=u["id"]:
         db.close(); flash("Not allowed.","error"); return redirect(url_for("candidates_all"))
 
+    # Load the most recent feedback by THIS interviewer for audit/edit
+    cur.execute("""SELECT * FROM interviews WHERE candidate_id=? AND interviewer_id=? ORDER BY id DESC LIMIT 1""",
+                (candidate_id, u["id"]))
+    last_my = cur.fetchone()
+
     if request.method=="POST":
+        mode = (request.form.get("mode") or "new").strip()  # "new" or "edit"
         decision = request.form.get("decision","").strip().lower()
         rating = request.form.get("rating","").strip()
         feedback = request.form.get("feedback","").strip()
@@ -1207,6 +1523,37 @@ def interview_feedback(candidate_id):
         now = datetime.datetime.utcnow().isoformat()
         if decision not in ("selected","rejected","reinterview"):
             db.close(); flash("Choose a decision.","error"); return redirect(url_for('interview_feedback',candidate_id=candidate_id))
+
+        if mode == "edit":
+            if not last_my:
+                db.close(); flash("No previous feedback to edit.","error"); return redirect(url_for('interview_feedback',candidate_id=candidate_id))
+            # Preserve the original wrong remark once; subsequent edits keep the first prev_* values
+            prev_fb = last_my["prev_feedback"] if last_my["prev_feedback"] is not None else (last_my["feedback"] or "")
+            prev_rt = last_my["prev_rating"]   if last_my["prev_rating"]   is not None else last_my["rating"]
+            prev_dc = last_my["prev_decision"] if last_my["prev_decision"] is not None else (last_my["decision"] or "")
+            cur.execute("""
+                UPDATE interviews
+                SET feedback=?, rating=?, decision=?,
+                    prev_feedback=?, prev_rating=?, prev_decision=?,
+                    is_edited=1, edited_at=?, edited_by=?
+                WHERE id=?""",
+                (feedback, r, decision, prev_fb, prev_rt, prev_dc, now, u["id"], last_my["id"])
+            )
+            # Update candidate status to reflect the corrected decision
+            if decision=="reinterview":
+                cur.execute("UPDATE candidates SET status='reinterview' WHERE id=?", (candidate_id,))
+            else:
+                cur.execute("UPDATE candidates SET status='Assigned' WHERE id=?", (candidate_id,))
+            db.commit(); db.close()
+
+            # Notify manager that feedback was corrected
+            if c["manager_owner"]:
+                notify(c["manager_owner"], "Interview Feedback Updated",
+                       f"{c['full_name']}: INTERVIEWER UPDATED feedback. New decision: {decision.upper()}")
+            flash("Feedback updated and sent to manager.","message")
+            return redirect(url_for("candidates_all"))
+
+        # mode == "new" -> insert a new interview record
         cur.execute("INSERT INTO interviews(candidate_id,interviewer_id,feedback,rating,decision,is_reinterview,created_at) VALUES(?,?,?,?,?,?,?)",
                     (candidate_id,u["id"],feedback,r,decision,1 if decision=="reinterview" else 0,now))
         if decision=="reinterview":
@@ -1221,11 +1568,52 @@ def interview_feedback(candidate_id):
                    f"{c['full_name']}: {decision.upper()} (rating: {r or '-'})")
         flash("Feedback submitted to manager.","message"); return redirect(url_for("candidates_all"))
 
-    body=f"""
-    <div class="card" style="max-width:680px;margin:0 auto">
+    # GET: render both "new submission" and "edit last" (if exists)
+    last_block = ""
+    edit_form = ""
+    if last_my:
+        prev_info = ""
+        if last_my["is_edited"]:
+            prev_info = f"""
+              <div class="tag">Edited at: {(last_my['edited_at'] or '')[:19].replace('T',' ')}</div>
+              <div><strong>Previous Decision:</strong> {last_my['prev_decision'] or '-'}<br>
+              <strong>Previous Feedback:</strong><div style="white-space:pre-wrap">{(last_my['prev_feedback'] or '').strip() or '-'}</div></div>
+            """
+        last_block = f"""
+        <div class="card">
+          <strong>Your Last Submission</strong><br>
+          Decision: {last_my['decision']} &nbsp; Rating: {last_my['rating'] or '-'}<br>
+          Notes:<div style="white-space:pre-wrap">{(last_my['feedback'] or '').strip() or '-'}</div>
+          {prev_info}
+        </div>
+        """
+        edit_form = f"""
+        <div class="card">
+          <h4>Edit Last Feedback</h4>
+          <form method="post">
+            <input type="hidden" name="mode" value="edit">
+            <div class="row">
+              <div class="col"><label>Rating (1-5)</label><input name="rating" placeholder="e.g. 4" value="{last_my['rating'] or ''}"></div>
+            </div>
+            <label>Decision</label>
+            <select name="decision">
+              <option value="selected" {'selected' if (last_my['decision']=='selected') else ''}>Selected</option>
+              <option value="rejected" {'selected' if (last_my['decision']=='rejected') else ''}>Rejected</option>
+              <option value="reinterview" {'selected' if (last_my['decision']=='reinterview') else ''}>Ask Re-Interview</option>
+            </select>
+            <label>Remarks</label>
+            <textarea name="feedback" rows="5" placeholder="Corrected notes for manager">{(last_my['feedback'] or '')}</textarea>
+            <div style="margin-top:10px"><button class="btn">Update</button></div>
+          </form>
+        </div>
+        """
+
+    new_form = f"""
+    <div class="card">
       <h3>Interviewer Feedback</h3>
       <p><strong>{c['full_name']}</strong> — <span class="tag">{c['post_applied']}</span></p>
       <form method="post">
+        <input type="hidden" name="mode" value="new">
         <div class="row">
           <div class="col"><label>Rating (1-5)</label><input name="rating" placeholder="e.g. 4"></div>
         </div>
@@ -1241,7 +1629,8 @@ def interview_feedback(candidate_id):
       </form>
     </div>
     """
-    return render_page("Interviewer Feedback", body)
+
+    return render_page("Interviewer Feedback", (last_block + edit_form + new_form))
 
 # ---------- Bulk Upload ----------
 
@@ -1322,7 +1711,7 @@ def bulk_upload():
 
                 inserted+=1
 
-                # NEW: Notify manager for each inserted candidate
+                # Notify manager for each inserted candidate
                 if manager_id:
                     notify(manager_id, "Candidate Assigned to Your Role",
                            f"{full_name} (ID {cand_code}) assigned to your role.")
@@ -1407,7 +1796,7 @@ def finalize_candidate(candidate_id):
             notify(uid, "Candidate Finalized",
                    f"{c['full_name']} -> {action.upper()}. Remark: {(remark or '-')}")
 
-        # NEW: Notify ALL HR users for selected/rejected with name + ID
+        # Notify ALL HR users for selected/rejected with name + ID
         if action in ("select","reject"):
             title = "Candidate Selected" if action=="select" else "Candidate Rejected"
             msg = f"{c['full_name']} (ID {c['candidate_code'] or '-'}) was {('SELECTED' if action=='select' else 'REJECTED')} by manager."
@@ -1420,11 +1809,26 @@ def finalize_candidate(candidate_id):
 
         flash("Final decision updated.","message"); return redirect(url_for("dashboard"))
 
-    last_block = "<p>No interview yet.</p>" if not last else f"""
-    <div class="card"><strong>Latest Interview</strong><br>
-    By: {last['interviewer_name']}<br>Rating: {last['rating'] or '-'} / 5<br>Decision: {last['decision']}<br>
-    Notes:<div style="white-space:pre-wrap">{(last['feedback'] or '').strip() or '-'}</div>
-    </div>"""
+    # Show previous vs new remark if interviewer edited
+    if not last:
+        last_block = "<p>No interview yet.</p>"
+    else:
+        prev_block = ""
+        if last["is_edited"]:
+            prev_block = f"""
+            <div style="margin-top:8px;padding:8px;border:1px dashed #d1d5db;border-radius:8px">
+              <strong>Previous Decision:</strong> {last['prev_decision'] or '-'}<br>
+              <strong>Previous Feedback:</strong>
+              <div style="white-space:pre-wrap">{(last['prev_feedback'] or '').strip() or '-'}</div>
+            </div>
+            """
+        last_block = f"""
+        <div class="card"><strong>Latest Interview</strong><br>
+        By: {last['interviewer_name']}<br>Rating: {last['rating'] or '-'} / 5<br>Decision: {last['decision']}<br>
+        Notes:<div style="white-space:pre-wrap">{(last['feedback'] or '').strip() or '-'}</div>
+        {prev_block}
+        </div>"""
+
     body=f"""
     <div class="card" style="max-width:720px;margin:0 auto">
       <h3>Finalize Candidate</h3>
@@ -1652,7 +2056,6 @@ def admin_resets():
                             (datetime.datetime.utcnow().isoformat(), current_user()["id"], int(rid)))
                 db.commit();
                 try:
-                    # You may change this email to a generic notice if you prefer not to email the new passcode.
                     send_email(row["user_email"], "HMS New Passcode", f"<p>Your new passcode is: <b>{newp}</b></p>")
                 except Exception:
                     pass
