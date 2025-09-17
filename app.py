@@ -42,6 +42,15 @@ app = Flask(__name__)
 app.secret_key = SECRET_KEY
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024
 
+# Session / cookie hardening (tuned for PythonAnywhere; set SESSION_COOKIE_SECURE=0 in env for local http dev)
+secure_cookie = os.environ.get("SESSION_COOKIE_SECURE", "").lower() not in ("0","false","no","off")
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=secure_cookie,
+    PERMANENT_SESSION_LIFETIME=datetime.timedelta(hours=8)
+)
+
 # CSRF protection
 csrf = CSRFProtect(app)
 
@@ -57,6 +66,7 @@ def inject_csrf_inputs(response):
         if response.content_type.startswith("text/html"):
             html = response.get_data(as_text=True)
             token = generate_csrf()
+            # insert after each <form ... method="post" ...> opening tag
             pattern = re.compile(r'(<form\b[^>]*\bmethod=["\']?post["\']?[^>]*>)', re.IGNORECASE)
             html = pattern.sub(lambda m: m.group(1) + f'\n<input type="hidden" name="csrf_token" value="{token}">', html)
             response.set_data(html)
@@ -158,22 +168,22 @@ def init_db():
     if c.fetchone()["ct"] == 0:
         now = datetime.datetime.utcnow().isoformat()
         seed = [
-            ("Mr. Parveen Chaudhary","clinicalanalyst@dcdc.co.in",ROLE_ADMIN,None,"admin123"),
-            ("Mr. Deepak Agarwal","drdeepak@dcdc.co.in",ROLE_VP,None,"vp123"),
-            ("Ms. Barkha","jobs@dcdc.co.in",ROLE_HR,None,"hr123"),
-            ("Deepika","hiring@dcdc.co.in",ROLE_HR,None,"hrdp123"),
-            ("Karishma","hr_hiring@dcdc.co.in",ROLE_HR,None,"hrka123"),
-            ("Kajal","hiring_1@dcdc.co.in",ROLE_HR,None,"hrkj123"),
-            ("Sneha","hiring_2@dcdc.co.in",ROLE_HR,None,"hrsn123"),
-            ("Ravi","hiring_3@dcdc.co.in",ROLE_HR,None,"hrrv123"),
-            ("Shivani","recruitments@dcdc.co.in",ROLE_HR,None,"hrsv123"),
-            ("Udita","careers@dcdc.co.in",ROLE_HR,None,"hrud123"),
-            ("Dr. Yasir Anis","clinical_manager@dcdc.co.in",ROLE_MANAGER,None,"yasir123"),
-            ("Ms. Prachi","infectioncontroller@dcdc.co.in",ROLE_INTERVIEWER,None,"prachi123"),
-            ("Mr. Shaikh Saadi","dialysis.coord@dcdc.co.in",ROLE_MANAGER,None,"saadi123"),
-            ("Ms. Pankaja","rmclinical_4@dcdc.co.in",ROLE_INTERVIEWER,None,"pankaja123"),
-            ("Mr. Yekula Bhanu Prakash","rmclinical_6@dcdc.co.in",ROLE_INTERVIEWER,None,"bhanu123"),
-            ("Mr. Rohit","clinical_therapist@dcdc.co.in",ROLE_INTERVIEWER,None,"rohit123"),
+            ("Mr. Parveen Chaudhary","clinicalanalyst@dcdc.co.in",ROLE_ADMIN,None,"admin12345"),
+            ("Mr. Deepak Agarwal","drdeepak@dcdc.co.in",ROLE_VP,None,"vp123456"),
+            ("Ms. Barkha","jobs@dcdc.co.in",ROLE_HR,None,"hr123456"),
+            ("Deepika","hiring@dcdc.co.in",ROLE_HR,None,"hrdp1234"),
+            ("Karishma","hr_hiring@dcdc.co.in",ROLE_HR,None,"hrka1234"),
+            ("Kajal","hiring_1@dcdc.co.in",ROLE_HR,None,"hrkj1234"),
+            ("Sneha","hiring_2@dcdc.co.in",ROLE_HR,None,"hrsn1234"),
+            ("Ravi","hiring_3@dcdc.co.in",ROLE_HR,None,"hrrv1234"),
+            ("Shivani","recruitments@dcdc.co.in",ROLE_HR,None,"hrsv1234"),
+            ("Udita","careers@dcdc.co.in",ROLE_HR,None,"hrud1234"),
+            ("Dr. Yasir Anis","clinical_manager@dcdc.co.in",ROLE_MANAGER,None,"yasir1234"),
+            ("Ms. Prachi","infectioncontroller@dcdc.co.in",ROLE_INTERVIEWER,None,"prachi1234"),
+            ("Mr. Shaikh Saadi","dialysis.coord@dcdc.co.in",ROLE_MANAGER,None,"saadi1234"),
+            ("Ms. Pankaja","rmclinical_4@dcdc.co.in",ROLE_INTERVIEWER,None,"pankaja1234"),
+            ("Mr. Yekula Bhanu Prakash","rmclinical_6@dcdc.co.in",ROLE_INTERVIEWER,None,"bhanu1234"),
+            ("Mr. Rohit","clinical_therapist@dcdc.co.in",ROLE_INTERVIEWER,None,"rohit1234"),
         ]
         for n,e,r,m,p in seed:
             c.execute(
@@ -189,6 +199,19 @@ def init_db():
         c.execute("UPDATE users SET manager_id=? WHERE email='infectioncontroller@dcdc.co.in'", (yasir,))
         for em in ("rmclinical_4@dcdc.co.in","rmclinical_6@dcdc.co.in","clinical_therapist@dcdc.co.in"):
             c.execute("UPDATE users SET manager_id=? WHERE email=?", (saadi, em))
+
+    # PRAGMA + helpful indexes for speed at scale
+    c.execute("PRAGMA foreign_keys = ON")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_cand_created_at    ON candidates(created_at)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_cand_status        ON candidates(status)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_cand_final_dec     ON candidates(final_decision)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_cand_join_status   ON candidates(hr_join_status)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_cand_post          ON candidates(post_applied)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_cand_region        ON candidates(assigned_region)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_cand_manager       ON candidates(manager_owner)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_cand_interviewer   ON candidates(interviewer_id)")
+    c.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_cand_code_nonnull ON candidates(candidate_code) WHERE candidate_code IS NOT NULL")
+
     conn.commit()
     conn.close()
 
@@ -214,12 +237,6 @@ def notify(user_id:int, title:str, body:str=""):
     em = user_email_by_id(user_id)
     if em:
         send_email(em, title, f"<p>{body}</p>")
-
-def next_candidate_code():
-    db = get_db(); cur = db.cursor()
-    cur.execute("SELECT MAX(id) FROM candidates")
-    row = cur.fetchone(); db.close()
-    return f"DCDC_C{(row[0] or 0)+1}"
 
 # ---------- Helpers / Auth ----------
 
@@ -258,6 +275,12 @@ def interviewers_for_manager(mid:int):
     rows = cur.fetchall(); db.close()
     return rows
 
+def all_interviewers():
+    db = get_db(); cur = db.cursor()
+    cur.execute("SELECT id,name FROM users WHERE role='interviewer' ORDER BY name")
+    rows = cur.fetchall(); db.close()
+    return rows
+
 # unread notifications badge
 @app.context_processor
 def inject_unread():
@@ -290,7 +313,7 @@ header a{color:#e2e8f0;text-decoration:none;margin-right:12px}
 .row{display:flex;flex-wrap:wrap;gap:12px}
 .col{flex:1;min-width:280px}
 .btn{display:inline-block;padding:8px 12px;border-radius:10px;border:1px solid var(--vein-blue);background:var(--vein-blue);color:#fff;text-decoration:none;cursor:pointer}
-.btn.light{background:#fff;color:var(--vein-blue)}
+.btn.light{background:#fff;color:#0b5394}
 .btn.warn{background:#fff;color:#b45309;border-color:#b45309}
 .btn.danger{background:var(--artery-red);border-color:var(--artery-red)}
 input,select,textarea{width:100%;padding:10px;border:1px solid #d1d5db;border-radius:10px;margin-top:6px}
@@ -362,7 +385,11 @@ th,td{padding:8px;border-bottom:1px solid #eee;text-align:left}
         <a href="{{ url_for('admin_users') }}">Admin</a>
       {% endif %}
       <a href="{{ url_for('profile') }}">Profile</a>
-      <a href="{{ url_for('logout') }}">Logout</a>
+
+      <!-- Logout as POST for CSRF protection -->
+      <form method="post" action="{{ url_for('logout') }}" style="display:inline; margin-left:10px">
+        <button type="submit" class="btn light" style="padding:2px 8px">Logout</button>
+      </form>
 
       <!-- Bell INSIDE nav -->
       <a href="{{ url_for('notifications') }}" class="bell-link" title="Notifications" aria-label="Notifications">🔔
@@ -404,6 +431,7 @@ def brand_logo():
     return Response(b"GIF89a\x01\x00\x01\x00\x80\x00\x00\xff\xff\xff\x00\x00\x00!\xf9\x04\x01\n\x00\x01\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;", mimetype="image/gif")
 
 @app.route("/__unread")
+@login_required
 def __unread():
     u = current_user()
     n = 0
@@ -413,6 +441,7 @@ def __unread():
         n = cur.fetchone()[0] or 0
         db.close()
     return f"<pre>logged_in={bool(u)} role={u['role'] if u else '-'} unread={n}</pre>"
+
 # ---------- Auth ----------
 
 @app.route("/login", methods=["GET","POST"])
@@ -439,9 +468,12 @@ def login():
     """
     return render_page("Login", body)
 
-@app.route("/logout")
+@app.route("/logout", methods=["POST"])
+@login_required
 def logout():
-    session.clear(); return redirect(url_for("login"))
+    session.clear()
+    flash("You have been logged out.","message")
+    return redirect(url_for("login"))
 
 @app.route("/forgot", methods=["GET","POST"])
 def forgot_password():
@@ -453,7 +485,7 @@ def forgot_password():
         if cur.fetchone():
             cur.execute("INSERT INTO password_resets(user_email,state,created_at) VALUES(?,?,?)",(email,"open",now))
             db.commit()
-            # optional mail to admin inbox
+            # optional mail to user
             send_email(email, "HMS Reset Request", "<p>If you requested a reset, admin will update your passcode soon.</p>")
         db.close()
         flash("If the email exists, a reset request has been created.","message")
@@ -476,7 +508,8 @@ def profile():
     u=current_user()
     if request.method=="POST":
         old=request.form.get("old",""); new=request.form.get("new","")
-        if not new or len(new)<4: flash("New passcode must be at least 4 chars.","error")
+        if not new or len(new)<8: 
+            flash("New passcode must be at least 8 characters.","error")
         else:
             db=get_db(); cur=db.cursor()
             cur.execute("SELECT passcode FROM users WHERE id=?", (u["id"],))
@@ -754,18 +787,30 @@ def notifications():
         f"<tr><td>{r['created_at'][:19].replace('T',' ')}</td>"
         f"<td><strong>{r['title']}</strong><br><div style='white-space:pre-wrap'>{r['body'] or ''}</div></td>"
         f"<td>{'Unread' if not r['is_read'] else 'Read'}</td>"
-        f"<td><a class='btn' href='{url_for('mark_notif_read', nid=r['id'])}'>Mark read</a></td></tr>"
+        f"<td><form method='post' action='{url_for('mark_notif_read', nid=r['id'])}' style='display:inline'>"
+        f"<button class='btn'>Mark read</button></form></td></tr>"
     ]) or "<tr><td colspan=4>No notifications</td></tr>"
     body = f"""<div class="card"><h3>Notifications</h3>
+    <form method="post" action="{url_for('mark_all_notif_read')}" style="margin-bottom:10px">
+      <button class="btn light">Mark all as read</button>
+    </form>
     <table><thead><tr><th>Time</th><th>Message</th><th>Status</th><th></th></tr></thead>
     <tbody>{trs}</tbody></table></div>"""
     return render_page("Notifications", body)
 
-@app.route("/notifications/read/<int:nid>")
+@app.route("/notifications/read/<int:nid>", methods=["POST"])
 @login_required
 def mark_notif_read(nid):
     u=current_user(); db=get_db(); cur=db.cursor()
     cur.execute("UPDATE notifications SET is_read=1 WHERE id=? AND user_id=?", (nid, u["id"]))
+    db.commit(); db.close()
+    return redirect(url_for('notifications'))
+
+@app.route("/notifications/read-all", methods=["POST"])
+@login_required
+def mark_all_notif_read():
+    u=current_user(); db=get_db(); cur=db.cursor()
+    cur.execute("UPDATE notifications SET is_read=1 WHERE user_id=?", (u["id"],))
     db.commit(); db.close()
     return redirect(url_for('notifications'))
 
@@ -879,10 +924,9 @@ def add_candidate():
             flash("Mobile number must be exactly 10 digits.","error")
             return redirect(url_for("add_candidate"))
 
-        candidate_code = (f.get("candidate_code") or "").strip() or next_candidate_code()
+        candidate_code = (f.get("candidate_code") or "").strip() or None
 
         fields = dict(
-            candidate_code=candidate_code,
             salutation=f.get("salutation","").strip(),
             full_name=f.get("full_name","").strip(),
             email=f.get("email","").strip(),
@@ -916,8 +960,12 @@ def add_candidate():
         INSERT INTO candidates(candidate_code,salutation,full_name,email,qualification,experience_years,current_designation,phone,cv_path,current_salary,expected_salary,current_location,preferred_location,post_applied,interview_date,current_previous_company,assigned_region,status,decision_by,remarks,created_by,created_at,interviewer_id,manager_owner,final_decision,final_remark,finalized_by,finalized_at,hr_join_status,hr_joined_at)
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,(
-            fields["candidate_code"],fields["salutation"],fields["full_name"],fields["email"],fields["qualification"],ey,fields["current_designation"],fields["phone"],cv_path,fields["current_salary"],fields["expected_salary"],fields["current_location"],fields["preferred_location"],fields["post_applied"],fields["interview_date"],fields["current_previous_company"],fields["assigned_region"],status,None,fields["remarks"],u["id"],now,None,manager_id,None,None,None,None,None,None
+            candidate_code,fields["salutation"],fields["full_name"],fields["email"],fields["qualification"],ey,fields["current_designation"],fields["phone"],cv_path,fields["current_salary"],fields["expected_salary"],fields["current_location"],fields["preferred_location"],fields["post_applied"],fields["interview_date"],fields["current_previous_company"],fields["assigned_region"],status,None,fields["remarks"],u["id"],now,None,manager_id,None,None,None,None,None,None
         ))
+        cid = cur.lastrowid
+        if candidate_code is None:
+            candidate_code = f"DCDC_C{cid}"
+            cur.execute("UPDATE candidates SET candidate_code=? WHERE id=?", (candidate_code, cid))
         db.commit(); db.close()
 
         # NEW: Notify manager (so bell shows candidates assigned to manager's role)
@@ -925,10 +973,10 @@ def add_candidate():
             notify(manager_id, "Candidate Assigned to Your Role",
                    f"{fields['full_name']} (ID {candidate_code}) assigned to your role.")
 
-        flash(f"Candidate added (ID: {fields['candidate_code']}).","message")
+        flash(f"Candidate added (ID: {candidate_code}).","message")
         return redirect(url_for("dashboard"))
 
-    default_code = next_candidate_code()
+    default_code = ""  # leave blank; auto-generated after insert if not provided
     options="".join([f"<option>{p}</option>" for p in POSTS])
     body=f"""
     <div class="card">
@@ -1033,7 +1081,7 @@ def assign_candidate(candidate_id):
             notify(c["created_by"], "Candidate Assigned", f"{c['full_name']} assigned to interviewer (ID {iid}).")
         flash("Assigned to interviewer.","message"); return redirect(url_for("candidates_all"))
 
-    ivs = interviewers_for_manager(u["id"])
+    ivs = all_interviewers() if u["role"] == ROLE_ADMIN else interviewers_for_manager(u["id"])
     opts = "".join([f"<option value='{i['id']}' {'selected' if c['interviewer_id']==i['id'] else ''}>{i['name']}</option>" for i in ivs]) or "<option disabled>No interviewers</option>"
     body=f"""
     <div class="card" style="max-width:600px;margin:0 auto">
@@ -1069,8 +1117,8 @@ def bulk_assign():
         """, args)
         rows = cur.fetchall()
 
-        ivs = interviewers_for_manager(u["id"]) if u["role"] != ROLE_ADMIN else []
-        iv_opts = "".join([f"<option value='{i['id']}'>{i['name']}</option>" for i in ivs]) if ivs else ""
+        ivs = all_interviewers() if u["role"] == ROLE_ADMIN else interviewers_for_manager(u["id"])
+        iv_opts = "".join([f"<option value='{i['id']}'>{i['name']}</option>" for i in ivs]) if ivs else "<option disabled>No interviewers</option>"
 
         trs = "".join([
             f"<tr>"
@@ -1224,7 +1272,7 @@ def bulk_upload():
 
         try:
             wb = load_workbook(xpath); ws = wb.active
-            headers = [ (ws.cell(row=1,col=i).value or "").strip().lower() for i in range(1, ws.max_column+1) ]
+            headers = [ (ws.cell(row=1, column=i).value or "").strip().lower() for i in range(1, ws.max_column+1) ]
             def idx(label):
                 l=label.strip().lower()
                 return headers.index(l) if l in headers else None
@@ -1240,11 +1288,9 @@ def bulk_upload():
             now = datetime.datetime.utcnow().isoformat()
             u=current_user()
 
-            cur.execute("SELECT MAX(id) FROM candidates"); next_base = (cur.fetchone()[0] or 0)
-
             for r in range(2, ws.max_row+1):
                 def v(key):
-                    ci = m.get(key); return (ws.cell(row=r, col=ci+1).value if ci is not None else "") or ""
+                    ci = m.get(key); return (ws.cell(row=r, column=(ci+1)).value if ci is not None else "") or ""
                 post=str(v("post applied")).strip(); full_name=str(v("name")).strip()
                 if post not in POSTS or not full_name: bad_post_or_name+=1; continue
 
@@ -1254,8 +1300,7 @@ def bulk_upload():
                 try: ey=float(v("experience (years)")) if str(v("experience (years)"))!="" else None
                 except: ey=None
 
-                cand_code = str(v("candidate id")).strip()
-                if not cand_code: next_base += 1; cand_code = f"DCDC_C{next_base}"
+                cand_code = (str(v("candidate id")).strip() or None)
 
                 manager_id = manager_for_post(post); status = "Assigned"
                 cur.execute("""
@@ -1269,6 +1314,12 @@ def bulk_upload():
                     str(v("region")).strip(), status, None, str(v("remarks")).strip(),
                     u["id"], now, None, manager_id, None, None, None, None, None, None
                 ))
+
+                cid = cur.lastrowid
+                if cand_code is None:
+                    cand_code = f"DCDC_C{cid}"
+                    cur.execute("UPDATE candidates SET candidate_code=? WHERE id=?", (cand_code, cid))
+
                 inserted+=1
 
                 # NEW: Notify manager for each inserted candidate
@@ -1542,8 +1593,8 @@ def admin_users():
         role=request.form.get("role","").strip()
         manager_id=request.form.get("manager_id","").strip()
         passcode=request.form.get("passcode","").strip()
-        if not name or not email or role not in (ROLE_ADMIN,ROLE_VP,ROLE_HR,ROLE_MANAGER,ROLE_INTERVIEWER) or not passcode:
-            flash("Provide name, email, role, passcode.","error")
+        if not name or not email or role not in (ROLE_ADMIN,ROLE_VP,ROLE_HR,ROLE_MANAGER,ROLE_INTERVIEWER) or not passcode or len(passcode)<8:
+            flash("Provide name, email, role, and a passcode (min 8 chars).","error")
         else:
             mid=int(manager_id) if manager_id.isdigit() else None
             try:
@@ -1592,15 +1643,16 @@ def admin_resets():
     db=get_db(); cur=db.cursor()
     if request.method=="POST":
         rid=request.form.get("rid",""); newp=request.form.get("new","")
-        if rid.isdigit() and len(newp)>=4:
+        if rid.isdigit() and len(newp)>=8:
             cur.execute("SELECT * FROM password_resets WHERE id=? AND state='open'", (int(rid),))
             row=cur.fetchone()
             if row:
                 cur.execute("UPDATE users SET passcode=? WHERE email=?", (generate_password_hash(newp),row["user_email"]))
-                cur.execute("""UPDATE password_resets SET state='resolved', resolved_at=?, resolver_id=?, new_passcode=? WHERE id=?""",
-                            (datetime.datetime.utcnow().isoformat(), current_user()["id"], newp, int(rid)))
+                cur.execute("""UPDATE password_resets SET state='resolved', resolved_at=?, resolver_id=?, new_passcode=NULL WHERE id=?""",
+                            (datetime.datetime.utcnow().isoformat(), current_user()["id"], int(rid)))
                 db.commit();
                 try:
+                    # You may change this email to a generic notice if you prefer not to email the new passcode.
                     send_email(row["user_email"], "HMS New Passcode", f"<p>Your new passcode is: <b>{newp}</b></p>")
                 except Exception:
                     pass
@@ -1608,7 +1660,7 @@ def admin_resets():
             else:
                 flash("Reset not found or already resolved.","error")
         else:
-            flash("Provide valid request ID and a new passcode (>=4 chars).","error")
+            flash("Provide valid request ID and a new passcode (>=8 chars).","error")
 
     cur.execute("SELECT * FROM password_resets ORDER BY created_at DESC")
     rows=cur.fetchall(); db.close()
