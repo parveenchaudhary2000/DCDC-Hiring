@@ -86,6 +86,9 @@ def get_db():
 def init_db():
     conn = get_db(); c = conn.cursor()
 
+
+
+
     c.execute("""
     CREATE TABLE IF NOT EXISTS users(
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -315,6 +318,16 @@ def candidate_role_scope_where(u):
         return "manager_owner=?", [u["id"]]
     else:
         return "interviewer_id=?", [u["id"]]
+def migrate_db():
+    conn = get_db(); c = conn.cursor()
+    # add columns to password_resets if they are missing
+    c.execute("PRAGMA table_info(password_resets)")
+    cols = {row[1] for row in c.fetchall()}
+    if "token" not in cols:
+        c.execute("ALTER TABLE password_resets ADD COLUMN token TEXT")
+    if "expires_at" not in cols:
+        c.execute("ALTER TABLE password_resets ADD COLUMN expires_at TEXT")
+    conn.commit(); conn.close()
 
 # unread notifications badge
 @app.context_processor
@@ -1410,13 +1423,13 @@ def bulk_assign():
         COALESCE((SELECT name FROM users uu WHERE uu.id=c.interviewer_id), '-') as current_iv
         FROM candidates c
         WHERE {base_where}
-        AND (c.interviewer_id IS NULL OR c.status IN ('Assigned','reinterview'))
+          AND (c.interviewer_id IS NULL OR c.status IN ('Assigned','reinterview'))
         ORDER BY datetime(c.created_at) DESC
         """, args)
         rows = cur.fetchall()
 
-        ivs = all_interviewers() if u["role"] == ROLE_ADMIN else interviewers_for_manager(u["id"])
-        iv_opts = "".join([f"<option value='{i['id']}'>{i['name']}</option>" for i in ivs]) if ivs else "<option disabled>No interviewers</option>"
+        ivs = interviewers_for_manager(u["id"]) if u["role"] != ROLE_ADMIN else []
+        iv_opts = "".join([f"<option value='{i['id']}'>{i['name']}</option>" for i in ivs]) if ivs else ""
 
         trs = "".join([
             f"<tr>"
@@ -1447,7 +1460,7 @@ def bulk_assign():
             <table>
               <thead>
                 <tr>
-                  <th><input type='checkbox' id='selAll' onclick='toggleAll(this)'></th>
+                  <th><input type="checkbox" id="check_all"></th>
                   <th>ID</th><th>Name</th><th>Post</th><th>Status</th><th>Current Interviewer</th>
                 </tr>
               </thead>
@@ -1460,18 +1473,28 @@ def bulk_assign():
             </div>
           </form>
         </div>
+        """
+        # IMPORTANT: plain (non-f) string to avoid f-string brace parsing
+        body += """
         <script>
-        function toggleAll(cb){
-          document.querySelectorAll("input[name='ids']").forEach(el => {{ el.checked = cb.checked; }});
-        }
+        (function () {
+          var master = document.getElementById('check_all');
+          if (!master) return;
+          master.addEventListener('change', function () {
+            var cb = this;
+            document.querySelectorAll("input[name='ids']").forEach(function(el){ el.checked = cb.checked; });
+          });
+        })();
         </script>
         """
         db.close(); return render_page("Bulk Assign", body)
 
+    # ------ POST ------
     iid = request.form.get("interviewer_id", "").strip()
     ids = request.form.getlist("ids")
     if not iid.isdigit() or not ids:
-        db.close(); flash("Pick an interviewer and at least one candidate.", "error"); return redirect(url_for("bulk_assign"))
+        db.close(); flash("Pick an interviewer and at least one candidate.", "error")
+        return redirect(url_for("bulk_assign"))
 
     placeholders = ",".join("?" for _ in ids)
     params = [int(iid)] + ids
@@ -1479,17 +1502,25 @@ def bulk_assign():
     if u["role"] != ROLE_ADMIN:
         owner_guard = " AND manager_owner=?"; params.append(u["id"])
 
-    cur.execute(f"UPDATE candidates SET interviewer_id=?, status='Assigned' WHERE id IN ({placeholders}){owner_guard}", params)
+    cur.execute(
+        f"UPDATE candidates SET interviewer_id=?, status='Assigned' "
+        f"WHERE id IN ({placeholders}){owner_guard}", params
+    )
 
-    cur.execute(f"SELECT candidate_code, full_name, post_applied FROM candidates WHERE id IN ({placeholders})", ids)
+    cur.execute(
+        f"SELECT candidate_code, full_name, post_applied "
+        f"FROM candidates WHERE id IN ({placeholders})", ids
+    )
     det_rows = cur.fetchall()
 
     db.commit(); db.close()
 
-    details = "\n".join([f"- {r['full_name']} (ID {r['candidate_code'] or '-'}) — {r['post_applied']}" for r in det_rows]) or "-"
-    notify(int(iid), "Candidates Assigned", f"{len(det_rows)} candidates have been assigned to you:\n{details}")
+    details = "\\n".join(
+        [f"- {r['full_name']} (ID {r['candidate_code'] or '-'}) — {r['post_applied']}" for r in det_rows]
+    ) or "-"
+    notify(int(iid), "Candidates Assigned", f"{len(det_rows)} candidates have been assigned to you:\\n{details}")
 
-    flash("Candidates assigned.","message")
+    flash("Candidates assigned.", "message")
     return redirect(url_for("candidates_all"))
 
 # ---------- Interviewer: feedback (new + editable with audit) ----------
