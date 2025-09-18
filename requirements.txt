@@ -1,6 +1,7 @@
 flask
-openpyxl
 gunicorn
-Flask-WTF
-sendgrid
 Werkzeug
+Flask==3.1.2
+Flask-WTF==1.2.2
+openpyxl==3.1.5
+sendgrid==6.12.4
