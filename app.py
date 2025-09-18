@@ -828,11 +828,11 @@ def candidates_all():
 
     rows_html_list = []
     for r in rows:
-    if r['cv_path']:
-        _cv_url = url_for("download_cv", path=r["cv_path"])
-        cv_html = f'<a href="{_cv_url}">CV</a>'
-    else:
-        cv_html = '-'
+        if r['cv_path']:
+            _cv_url = url_for("download_cv", path=r["cv_path"])
+            cv_html = f'<a href="{_cv_url}">CV</a>'
+        else:
+            cv_html = '-'
 
     rows_html_list.append(
         f"<tr>"
@@ -847,7 +847,9 @@ def candidates_all():
         f"<td>{actions(r)}</td>"
         f"</tr>"
     )
-    rows_html = "".join(rows_html_list) or "<tr><td colspan=9>No data</td></tr>"
+
+rows_html = "".join(rows_html_list) or "<tr><td colspan=9>No data</td></tr>"
+
 
     chips = ""
     if current_user()['role'] in (ROLE_MANAGER, ROLE_ADMIN):
