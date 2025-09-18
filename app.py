@@ -56,6 +56,15 @@ app = Flask(__name__)
 app.secret_key = SECRET_KEY
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16MB
 
+@app.before_first_request
+def _warmup_and_migrate():
+    try:
+        init_db()
+    except Exception as e:
+        # Do not crash the app if migrations fail; check server log instead
+        print("init_db() failed:", e)
+
+
 csrf = CSRFProtect(app)
 
 @app.context_processor
@@ -81,6 +90,17 @@ def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+def ensure_column(table: str, column: str, decl: str):
+    """Add a column if it does not exist (SQLite)."""
+    db = get_db(); cur = db.cursor()
+    cur.execute(f"PRAGMA table_info({table})")
+    cols = {row[1] for row in cur.fetchall()}
+    if column not in cols:
+        cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+        db.commit()
+    db.close()
+
 
 def init_db():
     conn = get_db(); c = conn.cursor()
@@ -202,6 +222,13 @@ def init_db():
         for em in ("rmclinical_4@dcdc.co.in","rmclinical_6@dcdc.co.in","clinical_therapist@dcdc.co.in"):
             c.execute("UPDATE users SET manager_id=? WHERE email=?", (saadi, em))
     conn.commit(); conn.close()
+    # Ensure new columns exist for older databases
+    try:
+        ensure_column('password_resets', 'token', 'TEXT')
+        ensure_column('password_resets', 'expires_at', 'TEXT')
+    except Exception:
+        pass
+
 
 def migrate_db():
     """Add missing columns if DB created from an older build."""
@@ -551,46 +578,41 @@ def dashboard():
     def scalar(sql, a=()):
         cur.execute(sql, a); r = cur.fetchone(); return r[0] if r else 0
 
-    total = scalar("SELECT COUNT(*) FROM candidates WHERE {}".format(WHERE), args)
-    selected = scalar("SELECT COUNT(*) FROM candidates WHERE {} AND lower(final_decision)='selected'".format(WHERE), args)
-    rejected = scalar("SELECT COUNT(*) FROM candidates WHERE {} AND lower(final_decision)='rejected'".format(WHERE), args)
-    assigned = scalar("SELECT COUNT(*) FROM candidates WHERE {} AND status='Assigned'".format(WHERE), args)
-    joined = scalar("SELECT COUNT(*) FROM candidates WHERE {} AND hr_join_status='joined'".format(WHERE), args)
+    total = scalar(f"SELECT COUNT(*) FROM candidates WHERE {WHERE}", args)
+    selected = scalar(f"SELECT COUNT(*) FROM candidates WHERE {WHERE} AND lower(final_decision)='selected'", args)
+    rejected = scalar(f"SELECT COUNT(*) FROM candidates WHERE {WHERE} AND lower(final_decision)='rejected'", args)
+    assigned = scalar(f"SELECT COUNT(*) FROM candidates WHERE {WHERE} AND status='Assigned'", args)
+    joined = scalar(f"SELECT COUNT(*) FROM candidates WHERE {WHERE} AND hr_join_status='joined'", args)
 
     cur.execute("SELECT DISTINCT post_applied FROM candidates ORDER BY post_applied")
     posts = [r[0] for r in cur.fetchall() if r[0]]
     cur.execute("SELECT DISTINCT assigned_region FROM candidates WHERE assigned_region IS NOT NULL AND assigned_region<>'' ORDER BY assigned_region")
     regions = [r[0] for r in cur.fetchall()]
 
-    cur.execute("""SELECT id,full_name,post_applied,status,final_decision,hr_join_status,created_at,assigned_region
-                   FROM candidates WHERE {}
-                   ORDER BY datetime(created_at) DESC LIMIT 20""".format(WHERE), args)
+    cur.execute(f"""SELECT id,full_name,post_applied,status,final_decision,hr_join_status,created_at,assigned_region
+                    FROM candidates WHERE {WHERE}
+                    ORDER BY datetime(created_at) DESC LIMIT 20""", args)
     recent = cur.fetchall()
     recent_rows = "".join([
-        ("<tr><td>{}</td><td>{}</td>"
-         "<td><span class='tag'>{}</span></td>"
-         "<td>{}</td><td>{}</td>"
-         "<td>{}</td><td>{}</td></tr>").format(
-            r['full_name'], r['post_applied'], r['status'],
-            r['final_decision'] or '-', r['hr_join_status'] or '-',
-            r['assigned_region'] or '-', r['created_at'][:19].replace('T',' ')
-        ) for r in recent
+        (f"<tr><td>{r['full_name']}</td><td>{r['post_applied']}</td>"
+         f"<td><span class='tag'>{r['status']}</span></td>"
+         f"<td>{r['final_decision'] or '-'}</td><td>{r['hr_join_status'] or '-'}</td>"
+         f"<td>{r['assigned_region'] or '-'}</td><td>{r['created_at'][:19].replace('T',' ')}</td></tr>")
+        for r in recent
     ]) or "<tr><td colspan=7>No candidates match your filters.</td></tr>"
 
-    cur.execute("""SELECT COALESCE(final_decision,'(no final)') k, COUNT(*) c
-                   FROM candidates WHERE {} GROUP BY k ORDER BY c DESC""".format(WHERE), args)
+    cur.execute(f"SELECT COALESCE(final_decision,'(no final)') k, COUNT(*) c FROM candidates WHERE {WHERE} GROUP BY k ORDER BY c DESC", args)
     status_rows = cur.fetchall()
-    cur.execute("""SELECT COALESCE(NULLIF(assigned_region,''),'(Unassigned)') k, COUNT(*) c
-                   FROM candidates WHERE {} GROUP BY k ORDER BY c DESC""".format(WHERE), args)
+    cur.execute(f"SELECT COALESCE(NULLIF(assigned_region,''),'(Unassigned)') k, COUNT(*) c FROM candidates WHERE {WHERE} GROUP BY k ORDER BY c DESC", args)
     region_rows = cur.fetchall()
 
-    cur.execute("""SELECT strftime('%Y-%m', COALESCE(finalized_at, created_at)) m,
-                          SUM(CASE WHEN lower(final_decision)='selected' THEN 1 ELSE 0 END) sel
-                   FROM candidates WHERE {} GROUP BY m ORDER BY m""".format(WHERE), args)
+    cur.execute(f"""SELECT strftime('%Y-%m', COALESCE(finalized_at, created_at)) m,
+                    SUM(CASE WHEN lower(final_decision)='selected' THEN 1 ELSE 0 END) sel
+                    FROM candidates WHERE {WHERE} GROUP BY m ORDER BY m""", args)
     sel_map = { r["m"]: r["sel"] for r in cur.fetchall() if r["m"] }
-    cur.execute("""SELECT strftime('%Y-%m', hr_joined_at) m, COUNT(*) j
-                   FROM candidates WHERE {} AND hr_join_status='joined' AND hr_joined_at IS NOT NULL
-                   GROUP BY m ORDER BY m""".format(WHERE), args)
+    cur.execute(f"""SELECT strftime('%Y-%m', hr_joined_at) m, COUNT(*) j
+                    FROM candidates WHERE {WHERE} AND hr_join_status='joined' AND hr_joined_at IS NOT NULL
+                    GROUP BY m ORDER BY m""", args)
     join_map = { r["m"]: r["j"] for r in cur.fetchall() if r["m"] }
 
     months = sorted(set(list(sel_map.keys()) + list(join_map.keys())))[-12:]
@@ -600,10 +622,10 @@ def dashboard():
 
     db.close()
 
-    opts_status = "".join(["<option value='{}' {}>{}</option>".format(
-        s, "selected" if q_status==s else "", s or "All") for s in ["","Pending","Assigned","reinterview","finalized","Selected","Rejected","Joined"]])
-    opts_post = "<option value=''>All</option>" + "".join(["<option value='{}' {}>{}</option>".format(p, "selected" if q_post==p else "", p) for p in posts])
-    opts_region = "<option value=''>All</option>" + "".join(["<option value='{}' {}>{}</option>".format(r, "selected" if q_region==r else "", r) for r in regions])
+    opts_status = "".join([f"<option value='{s}' {'selected' if q_status==s else ''}>{s or 'All'}</option>"
+                           for s in ["","Pending","Assigned","reinterview","finalized","Selected","Rejected","Joined"]])
+    opts_post = "<option value=''>All</option>" + "".join([f"<option value='{p}' {'selected' if q_post==p else ''}>{p}</option>" for p in posts])
+    opts_region = "<option value=''>All</option>" + "".join([f"<option value='{r}' {'selected' if q_region==r else ''}>{r}</option>" for r in regions])
 
     page_css = """
     <style>
@@ -622,6 +644,14 @@ def dashboard():
     </style>
     """
 
+    # ---- SAFE charts: put data into a JSON object and keep the JS as a plain string
+    chart_data = {
+        "selected": selected,
+        "rejected": rejected,
+        "assigned": assigned,
+        "region": {"labels":[r["k"] for r in region_rows], "counts":[r["c"] for r in region_rows]},
+        "line": {"labels": line_labels, "sel": line_sel, "join": line_join}
+    }
     charts_html = """
     <div class="card">
       <h3>Charts</h3>
@@ -642,92 +672,80 @@ def dashboard():
         </div>
       </div>
     </div>
+
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script>
-    (function(){
-      const statusLabels = ["Selected","Rejected","Assigned"];
-      const statusCounts = [%d,%d,%d];
-      const regionLabels = %s;
-      const regionCounts = %s;
-      const lineLabels = %s;
-      const lineSel = %s;
-      const lineJoin = %s;
+      const CD = """ + json.dumps(chart_data) + """;
+      (function(){
+        const statusLabels = ["Selected","Rejected","Assigned"];
+        const statusCounts = [CD.selected, CD.rejected, CD.assigned];
 
-      new Chart(document.getElementById('statusPie'), {
-        type: 'pie',
-        data: { labels: statusLabels, datasets: [{ data: statusCounts }] },
-        options: { responsive: true }
-      });
+        new Chart(document.getElementById('statusPie'), {
+          type: 'pie',
+          data: { labels: statusLabels, datasets: [{ data: statusCounts }] },
+          options: { responsive: true }
+        });
 
-      new Chart(document.getElementById('regionBar'), {
-        type: 'bar',
-        data: { labels: regionLabels, datasets: [{ label: 'Candidates', data: regionCounts }] },
-        options: { responsive: true, scales: { y: { beginAtZero: true } } }
-      });
+        new Chart(document.getElementById('regionBar'), {
+          type: 'bar',
+          data: { labels: CD.region.labels, datasets: [{ label: 'Candidates', data: CD.region.counts }] },
+          options: { responsive: true, scales: { y: { beginAtZero: true } } }
+        });
 
-      new Chart(document.getElementById('selJoinLine'), {
-        type: 'line',
-        data: { labels: lineLabels,
-          datasets: [
-            { label: 'Selected', data: lineSel, tension: 0.35 },
-            { label: 'Joined', data: lineJoin, tension: 0.35 }
-          ]
-        },
-        options: { responsive: true }
-      });
-    })();
+        new Chart(document.getElementById('selJoinLine'), {
+          type: 'line',
+          data: { labels: CD.line.labels, datasets: [
+            { label: 'Selected', data: CD.line.sel, tension: 0.35 },
+            { label: 'Joined', data: CD.line.join, tension: 0.35 }
+          ]},
+          options: { responsive: true }
+        });
+      })();
     </script>
-    """ % (
-        selected, rejected, assigned,
-        json.dumps([r["k"] for r in region_rows]),
-        json.dumps([r["c"] for r in region_rows]),
-        json.dumps(line_labels),
-        json.dumps(line_sel),
-        json.dumps(line_join),
-    )
+    """
 
-    recent_html = """
+    recent_html = f"""
     <div class="card">
       <h3>Newly Added (Latest 20)</h3>
-      <div class="chip">Status: {}</div>
-      <div class="chip">Post: {}</div>
-      <div class="chip">Region: {}</div>
-      <div class="chip">From: {}</div>
-      <div class="chip">To: {}</div>
+      <div class="chip">Status: {q_status or 'All'}</div>
+      <div class="chip">Post: {q_post or 'All'}</div>
+      <div class="chip">Region: {q_region or 'All'}</div>
+      <div class="chip">From: {q_from or '—'}</div>
+      <div class="chip">To: {q_to or '—'}</div>
       <table>
         <thead><tr><th>Name</th><th>Post</th><th>Status</th><th>Final</th><th>Joined</th><th>Region</th><th>Created</th></tr></thead>
-        <tbody>{}</tbody>
+        <tbody>{recent_rows}</tbody>
       </table>
     </div>
-    """.format(q_status or 'All', q_post or 'All', q_region or 'All', q_from or '—', q_to or '—', recent_rows)
+    """
 
-    filters_html = """
+    filters_html = f"""
     <div class="filter-bar">
       <form method="get">
         <div class="filters">
-          <div><label>Status</label><select name="status">{}</select></div>
-          <div><label>Post</label><select name="post">{}</select></div>
-          <div><label>Region</label><select name="region">{}</select></div>
-          <div><label>From</label><input type="date" name="from" value="{}"></div>
-          <div><label>To</label><input type="date" name="to" value="{}"></div>
+          <div><label>Status</label><select name="status">{opts_status}</select></div>
+          <div><label>Post</label><select name="post">{opts_post}</select></div>
+          <div><label>Region</label><select name="region">{opts_region}</select></div>
+          <div><label>From</label><input type="date" name="from" value="{q_from}"></div>
+          <div><label>To</label><input type="date" name="to" value="{q_to}"></div>
         </div>
         <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
           <button class="btn">Apply Filters</button>
-          <a class="btn light" href="{}">Clear</a>
+          <a class="btn light" href="{url_for('dashboard')}">Clear</a>
         </div>
       </form>
     </div>
-    """.format(opts_status, opts_post, opts_region, q_from, q_to, url_for('dashboard'))
+    """
 
-    tiles_html = """
+    tiles_html = f"""
     <div class="tiles">
-      <div class="tile t1"><h4>Total Candidates</h4><div class="num">{}</div></div>
-      <div class="tile t2"><h4>Selected</h4><div class="num">{}</div></div>
-      <div class="tile t3"><h4>Rejected</h4><div class="num">{}</div></div>
-      <div class="tile t4"><h4>Assigned</h4><div class="num">{}</div></div>
-      <div class="tile t5"><h4>Joined</h4><div class="num">{}</div></div>
+      <div class="tile t1"><h4>Total Candidates</h4><div class="num">{total}</div></div>
+      <div class="tile t2"><h4>Selected</h4><div class="num">{selected}</div></div>
+      <div class="tile t3"><h4>Rejected</h4><div class="num">{rejected}</div></div>
+      <div class="tile t4"><h4>Assigned</h4><div class="num">{assigned}</div></div>
+      <div class="tile t5"><h4>Joined</h4><div class="num">{joined}</div></div>
     </div>
-    """.format(total, selected, rejected, assigned, joined)
+    """
 
     body = page_css + "<div class='dash-grid'>" + filters_html + tiles_html + charts_html + recent_html + "</div>"
     return render_page("Dashboard", body)
@@ -810,18 +828,25 @@ def candidates_all():
 
     rows_html_list = []
     for r in rows:
-        cv_html = '<a href="{}">CV</a>'.format(url_for("download_cv", path=r["cv_path"])) if r['cv_path'] else '-'
-        rows_html_list.append(
-            "<tr>"
-            "<td>{}</td><td>{}</td><td>{}</td>"
-            "<td><span class='tag'>{}</span></td>"
-            "<td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td>"
-            "</tr>".format(
-                r['candidate_code'] or '-', r['full_name'], r['post_applied'],
-                r['status'], r['final_decision'] or '-', r['hr_join_status'] or '-',
-                r['created_at'][:19].replace('T',' '), cv_html, actions(r)
-            )
-        )
+    if r['cv_path']:
+        _cv_url = url_for("download_cv", path=r["cv_path"])
+        cv_html = f'<a href="{_cv_url}">CV</a>'
+    else:
+        cv_html = '-'
+
+    rows_html_list.append(
+        f"<tr>"
+        f"<td>{r['candidate_code'] or '-'}</td>"
+        f"<td>{r['full_name']}</td>"
+        f"<td>{r['post_applied']}</td>"
+        f"<td><span class='tag'>{r['status']}</span></td>"
+        f"<td>{r['final_decision'] or '-'}</td>"
+        f"<td>{r['hr_join_status'] or '-'}</td>"
+        f"<td>{r['created_at'][:19].replace('T',' ')}</td>"
+        f"<td>{cv_html}</td>"
+        f"<td>{actions(r)}</td>"
+        f"</tr>"
+    )
     rows_html = "".join(rows_html_list) or "<tr><td colspan=9>No data</td></tr>"
 
     chips = ""
@@ -1069,32 +1094,41 @@ def bulk_assign():
         base_where = "manager_owner=?"; args = [u["id"]]
 
     if request.method == "GET":
-        cur.execute("""
+        cur.execute(f"""
         SELECT id, candidate_code, full_name, post_applied, status,
         COALESCE((SELECT name FROM users uu WHERE uu.id=c.interviewer_id), '-') as current_iv
         FROM candidates c
-        WHERE {}
-          AND (c.interviewer_id IS NULL OR c.status IN ('Assigned','reinterview'))
+        WHERE {base_where}
+        AND (c.interviewer_id IS NULL OR c.status IN ('Assigned','reinterview'))
         ORDER BY datetime(c.created_at) DESC
-        """.format(base_where), args)
+        """, args)
         rows = cur.fetchall()
 
         ivs = interviewers_for_manager(u["id"]) if u["role"] != ROLE_ADMIN else []
-        iv_opts = "".join(["<option value='{}'>{}</option>".format(i['id'], i['name']) for i in ivs]) if ivs else ""
+        iv_opts = "".join([f"<option value='{i['id']}'>{i['name']}</option>" for i in ivs]) if ivs else ""
 
         trs = "".join([
-            "<tr>"
-            "<td><input type='checkbox' name='ids' value='{}'></td>"
-            "<td>{}</td><td>{}</td><td>{}</td>"
-            "<td><span class='tag'>{}</span></td><td>{}</td>"
-            "</tr>".format(
-                r['id'], r['candidate_code'] or '-', r['full_name'],
-                r['post_applied'], r['status'], r['current_iv']
-            )
+            f"<tr>"
+            f"<td><input type='checkbox' name='ids' value='{r['id']}'></td>"
+            f"<td>{r['candidate_code'] or '-'}</td>"
+            f"<td>{r['full_name']}</td>"
+            f"<td>{r['post_applied']}</td>"
+            f"<td><span class='tag'>{r['status']}</span></td>"
+            f"<td>{r['current_iv']}</td>"
+            f"</tr>"
             for r in rows
         ]) or "<tr><td colspan='6'>No candidates available for bulk assignment.</td></tr>"
 
-        body = """
+        # Plain JS string (no f-string) to avoid brace problems
+        bulk_js = """
+        <script>
+        function ckAll(cb){
+          document.querySelectorAll("input[name='ids']").forEach(function(el){ el.checked = cb.checked; });
+        }
+        </script>
+        """
+
+        body = f"""
         <div class="card" style="max-width:960px;margin:0 auto">
           <h3>Bulk Assign Candidates</h3>
           <form method="post">
@@ -1103,7 +1137,7 @@ def bulk_assign():
                 <label>Assign to Interviewer</label>
                 <select name="interviewer_id" required>
                   <option value="">— select —</option>
-                  {}
+                  {iv_opts}
                 </select>
               </div>
             </div>
@@ -1111,36 +1145,22 @@ def bulk_assign():
             <table>
               <thead>
                 <tr>
-                  <th><input type="checkbox" id="check_all"></th>
+                  <th><input type="checkbox" onclick="ckAll(this)"></th>
                   <th>ID</th><th>Name</th><th>Post</th><th>Status</th><th>Current Interviewer</th>
                 </tr>
               </thead>
-              <tbody>{}</tbody>
+              <tbody>{trs}</tbody>
             </table>
 
             <div class="sticky-actions">
               <button class="btn">Assign Selected</button>
-              <a class="btn light" href="{}">Cancel</a>
+              <a class="btn light" href="{url_for('candidates_all')}">Cancel</a>
             </div>
           </form>
         </div>
-        """.format(iv_opts, trs, url_for('candidates_all'))
-        # Plain string JavaScript (not an f-string) to avoid brace parsing issues
-        body += """
-        <script>
-        (function () {
-          var master = document.getElementById('check_all');
-          if (!master) return;
-          master.addEventListener('change', function () {
-            var cb = this;
-            document.querySelectorAll("input[name='ids']").forEach(function(el){ el.checked = cb.checked; });
-          });
-        })();
-        </script>
-        """
+        """ + bulk_js
         db.close(); return render_page("Bulk Assign", body)
 
-    # POST
     iid = request.form.get("interviewer_id", "").strip()
     ids = request.form.getlist("ids")
     if not iid.isdigit() or not ids:
@@ -1152,15 +1172,16 @@ def bulk_assign():
     if u["role"] != ROLE_ADMIN:
         owner_guard = " AND manager_owner=?"; params.append(u["id"])
 
-    cur.execute("UPDATE candidates SET interviewer_id=?, status='Assigned' WHERE id IN ({}){}".format(placeholders, owner_guard), params)
+    cur.execute(f"UPDATE candidates SET interviewer_id=?, status='Assigned' WHERE id IN ({placeholders}){owner_guard}", params)
 
-    cur.execute("SELECT candidate_code, full_name, post_applied FROM candidates WHERE id IN ({})".format(placeholders), ids)
+    # Notify with a detailed list
+    cur.execute(f"SELECT candidate_code, full_name, post_applied FROM candidates WHERE id IN ({placeholders})", ids)
     det_rows = cur.fetchall()
 
     db.commit(); db.close()
 
-    details = "\n".join(["- {} (ID {}) — {}".format(r['full_name'], r['candidate_code'] or '-', r['post_applied']) for r in det_rows]) or "-"
-    notify(int(iid), "Candidates Assigned", "{} candidates have been assigned to you:\n{}".format(len(det_rows), details))
+    details = "\n".join([f"- {r['full_name']} (ID {r['candidate_code'] or '-'}) — {r['post_applied']}" for r in det_rows]) or "-"
+    notify(int(iid), "Candidates Assigned", f"{len(det_rows)} candidates have been assigned to you:\n{details}")
 
     flash("Candidates assigned.","message")
     return redirect(url_for("candidates_all"))
