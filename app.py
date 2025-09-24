@@ -13,6 +13,12 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from flask_wtf import CSRFProtect
 from flask_wtf.csrf import generate_csrf
 
+from markupsafe import escape
+def h(x):
+    """HTML-escape helper for building safe HTML strings."""
+    return '' if x is None else str(escape(x))
+
+
 # ------------------------- Email (SendGrid, optional) -------------------------
 def send_email(to, subject, html):
     """Best-effort email. Safe if SENDGRID not configured."""
@@ -40,12 +46,17 @@ UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 # Safer default so app boots even if env var missing; set real secret on Web tab
-_env_secret = os.environ.get("HMS_SECRET")
+_env_secret = os.environ.get("HMS_SECRET") or os.environ.get("SECRET_KEY")
+
 if _env_secret:
     SECRET_KEY = _env_secret
 else:
-    SECRET_KEY = secrets.token_hex(32)
-    print("[HMS] WARNING: HMS_SECRET not set; generated a transient secret key.")
+    # Only allow a fallback when running the local dev server
+    if __name__ == "__main__":  # python app.py
+        SECRET_KEY = "dev-only-change-me"
+        print("[HMS] DEV: using fallback SECRET_KEY; DO NOT use in production.")
+    else:
+        raise RuntimeError("HMS_SECRET env var is required in production.")
 
 LOGO_FILENAME = "logo.png"
 POSTS = [
@@ -65,18 +76,21 @@ app.config.update(
     SESSION_COOKIE_SAMESITE="Lax",
 )
 # In production behind HTTPS, uncomment:
-# app.config["SESSION_COOKIE_SECURE"] = True
+app.config["SESSION_COOKIE_SECURE"] = True
 
 csrf = CSRFProtect(app)
-
-@app.before_first_request
-def _warmup_and_migrate():
-    try:
-        init_db()
-        migrate_db()
-    except Exception as e:
-        # Do not crash the app if migrations fail; check server log instead
-        print("warmup init/migrate failed:", e)
+@app.after_request
+def add_security_headers(resp):
+    # Clickjacking protection
+    resp.headers.setdefault("X-Frame-Options", "DENY")
+    # Prevent MIME type sniffing
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    # Don’t send referrer to other sites
+    resp.headers.setdefault("Referrer-Policy", "no-referrer")
+    # Avoid caching for authenticated users
+    if 'user_id' in session:
+        resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 @app.context_processor
 def inject_csrf():
@@ -85,9 +99,14 @@ def inject_csrf():
 
 # --------------------------------- Database ----------------------------------
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     return conn
+
+# in init_db()
+c.execute("PRAGMA journal_mode=WAL")
+c.execute("PRAGMA foreign_keys=ON")
+
 
 def ensure_column(table: str, column: str, decl: str):
     """Add a column if it does not exist (SQLite)."""
@@ -508,7 +527,10 @@ def login():
         cur.execute("SELECT * FROM users WHERE email=?", (email,))
         u = cur.fetchone(); db.close()
         if u and check_password_hash(u["passcode"], passcode):
-            session["user_id"]=u["id"]; flash("Welcome!","message"); return redirect(url_for("dashboard"))
+            session.clear()
+            session["user_id"] = u["id"]
+            flash("Welcome!","message")
+            return redirect(url_for("dashboard"))
         flash("Invalid email or passcode.","error")
     token = generate_csrf()
     body = """
@@ -652,10 +674,16 @@ def dashboard():
                     ORDER BY datetime(created_at) DESC LIMIT 20""", args)
     recent = cur.fetchall()
     recent_rows = "".join([
-        (f"<tr><td>{r['full_name']}</td><td>{r['post_applied']}</td>"
-         f"<td><span class='tag'>{r['status']}</span></td>"
-         f"<td>{r['final_decision'] or '-'}</td><td>{r['hr_join_status'] or '-'}</td>"
-         f"<td>{r['assigned_region'] or '-'}</td><td>{(r['created_at'] or '')[:19].replace('T',' ')}</td></tr>")
+        (f"<tr><td>{h(r['full_name'])}</td><td>{h(r['post_applied'])}</td>"
+         f"<td><span class='tag'>{h(r['status'])}</span></td>"
+         f"<td>{h(r['final_decision'] or '-')}</td><td>{h(r['hr_join_status'] or '-')}</td>"
+         f"<td>{h(r['assigned_region'] or '-')}</td><td>{h((r['created_at'] or '')[:19].replace('T',' '))}</td></tr>")
+    
+        for r in recent
+        ]) or "<tr><td colspan=7>No candidates match your filters.</td></tr>"
+
+        
+        
         for r in recent
     ]) or "<tr><td colspan=7>No candidates match your filters.</td></tr>"
 
@@ -765,11 +793,11 @@ def dashboard():
     recent_html = f"""
     <div class="card">
       <h3>Newly Added (Latest 20)</h3>
-      <div class="chip">Status: {q_status or 'All'}</div>
-      <div class="chip">Post: {q_post or 'All'}</div>
-      <div class="chip">Region: {q_region or 'All'}</div>
-      <div class="chip">From: {q_from or '—'}</div>
-      <div class="chip">To: {q_to or '—'}</div>
+      <div class="chip">Status: {h(q_status) or 'All'}</div>
+      <div class="chip">Post: {h(q_post) or 'All'}</div>
+      <div class="chip">Region: {h(q_region) or 'All'}</div>
+      <div class="chip">From: {h(q_from) or '—'}</div>
+      <div class="chip">To: {h(q_to) or '—'}</div>
       <table>
         <thead><tr><th>Name</th><th>Post</th><th>Status</th><th>Final</th><th>Joined</th><th>Region</th><th>Created</th></tr></thead>
         <tbody>{recent_rows}</tbody>
@@ -818,16 +846,20 @@ def notifications():
     rows = cur.fetchall(); db.close()
     token = generate_csrf()
     trs = "".join([
-        "<tr><td>{}</td><td><strong>{}</strong><br><div style='white-space:pre-wrap'>{}</div></td>"
-        "<td>{}</td><td>"
-        "<form method='post' action='{}' style='display:inline'>"
-        "<input type='hidden' name='csrf_token' value='{}'>"
-        "<button class='btn'>Mark read</button></form>"
-        "</td></tr>".format(
-            (r['created_at'] or '')[:19].replace('T',' '), r['title'], (r['body'] or ''),
-            ('Unread' if not r['is_read'] else 'Read'),
-            url_for('mark_notif_read', nid=r['id']), token
-        )
+        tr = "<tr><td>{}</td><td><strong>{}</strong><br><div style='white-space:pre-wrap'>{}</div></td>" \
+             "<td>{}</td><td>" \
+             "<form method='post' action='{}' style='display:inline'>" \
+             "<input type='hidden' name='csrf_token' value='{}'>" \
+             "<button class='btn'>Mark read</button></form>" \
+             "</td></tr>".format(
+                 h((r['created_at'] or '')[:19].replace('T',' ')),
+                 h(r['title']),
+                 h(r['body'] or ''),
+                 ('Unread' if not r['is_read'] else 'Read'),
+                 url_for('mark_notif_read', nid=r['id']),
+                 token
+             )
+
         for r in rows
     ]) or "<tr><td colspan=4>No notifications</td></tr>"
     body = "<div class='card'><h3>Notifications</h3><table><thead><tr><th>Time</th><th>Message</th><th>Status</th><th></th></tr></thead><tbody>{}</tbody></table></div>".format(trs)
@@ -900,13 +932,13 @@ def candidates_all():
 
         rows_html_list.append(
             f"<tr>"
-            f"<td>{r['candidate_code'] or '-'}</td>"
-            f"<td>{r['full_name']}</td>"
-            f"<td>{r['post_applied']}</td>"
-            f"<td><span class='tag'>{r['status']}</span></td>"
-            f"<td>{r['final_decision'] or '-'}</td>"
-            f"<td>{r['hr_join_status'] or '-'}</td>"
-            f"<td>{(r['created_at'] or '')[:19].replace('T',' ')}</td>"
+            f"<td>{h(r['candidate_code'] or '-')}</td>"
+            f"<td>{h(r['full_name'])}</td>"
+            f"<td>{h(r['post_applied'])}</td>"
+            f"<td><span class='tag'>{h(r['status'])}</span></td>"
+            f"<td>{h(r['final_decision'] or '-')}</td>"
+            f"<td>{h(r['hr_join_status'] or '-')}</td>"
+            f"<td>{h((r['created_at'] or '')[:19].replace('T',' '))}</td>"
             f"<td>{cv_html}</td>"
             f"<td>{actions(r)}</td>"
             f"</tr>"
@@ -1391,9 +1423,11 @@ def finalize_candidate(candidate_id):
         for idx,h in enumerate(last2, start=1):
             tag = "EDIT" if h["is_edit"] else ("RE-INT" if h["is_reinterview"] else "NEW")
             cards.append(
-                "<div class='card'><strong>{} #{}</strong><br>By: {}<br>Rating: {} / 5<br>Decision: {} <span class='tag'>{}</span><br>"
+                "<div class='card'><strong>{} #{}</strong><br>By: {}<br>Rating: {} / 5<br>"
+                "Decision: {} <span class='tag'>{}</span><br>"
                 "Notes:<div style='white-space:pre-wrap'>{}</div></div>".format(
-                    "Entry", idx, h['interviewer_name'], h['rating'] or '-', h['decision'], tag, (h['feedback'] or '').strip() or '-'
+                    "Entry", idx, h(h['interviewer_name']), h(h['rating'] or '-'),
+                    h(h['decision']), h(tag), h((h['feedback'] or '').strip() or '-')
                 )
             )
         last_block = "".join(cards)
@@ -1662,9 +1696,17 @@ def admin_users():
 def admin_resets():
     db=get_db(); cur=db.cursor()
     if request.method=="POST":
-        rid=request.form.get("rid",""); newp=request.form.get("new","")
-        if rid.isdigit() and len(newp)>=4:
-            cur.execute("SELECT * FROM password_resets WHERE id=? AND state='open'", (int(rid),))
+        rid = request.form.get("rid","").strip()
+        newp = request.form.get("new","").strip()
+        tok  = request.form.get("token","").strip()
+        
+        if rid.isdigit() and len(newp) >= 4 and tok:
+            cur.execute("""SELECT * FROM password_resets
+                           WHERE id=? AND state='open' AND token=?
+                             AND datetime(expires_at) > datetime('now')""",
+                        (int(rid), tok))
+
+
             row=cur.fetchone()
             if row:
                 cur.execute("UPDATE users SET passcode=? WHERE email=?", (generate_password_hash(newp),row["user_email"]))
@@ -1704,11 +1746,16 @@ def admin_resets():
     <div class="card" style="max-width:560px">
       <h3>Resolve a Request</h3>
       <form method="post">
-        <input type="hidden" name="csrf_token" value="{}">
-        <label>Request ID</label><input name="rid" required>
-        <label>New Passcode</label><input name="new" required>
-        <div style="margin-top:10px"><button class="btn">Set New Passcode</button> <a class="btn light" href="{}">Back</a></div>
-      </form>
+          <input type="hidden" name="csrf_token" value="{}">
+          <label>Request ID</label><input name="rid" required>
+          <label>Token</label><input name="token" required>
+          <label>New Passcode</label><input name="new" required>
+          <div style="margin-top:10px">
+            <button class="btn">Set New Passcode</button>
+            <a class="btn light" href="{}">Back</a>
+          </div>
+        </form>
+
     </div>
     """.format(table, token, url_for('admin_users'))
     return render_page("Admin: Reset Requests", body)
