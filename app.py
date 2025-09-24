@@ -40,7 +40,12 @@ UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 # Safer default so app boots even if env var missing; set real secret on Web tab
-SECRET_KEY = os.environ.get("HMS_SECRET", "dev-insecure-secret-change-me")
+_env_secret = os.environ.get("HMS_SECRET")
+if _env_secret:
+    SECRET_KEY = _env_secret
+else:
+    SECRET_KEY = secrets.token_hex(32)
+    print("[HMS] WARNING: HMS_SECRET not set; generated a transient secret key.")
 
 LOGO_FILENAME = "logo.png"
 POSTS = [
@@ -188,26 +193,29 @@ def init_db():
     if (c.fetchone()["ct"] or 0) == 0:
         now = datetime.datetime.utcnow().isoformat()
         seed = [
-            ("Mr. Parveen Chaudhary","clinicalanalyst@dcdc.co.in",ROLE_ADMIN,None,"admin123"),
-            ("Mr. Deepak Agarwal","drdeepak@dcdc.co.in",ROLE_VP,None,"vp123"),
-            ("Ms. Barkha","jobs@dcdc.co.in",ROLE_HR,None,"hr123"),
-            ("Deepika","hiring@dcdc.co.in",ROLE_HR,None,"hrdp123"),
-            ("Karishma","hr_hiring@dcdc.co.in",ROLE_HR,None,"hrka123"),
-            ("Kajal","hiring_1@dcdc.co.in",ROLE_HR,None,"hrkj123"),
-            ("Sneha","hiring_2@dcdc.co.in",ROLE_HR,None,"hrsn123"),
-            ("Ravi","hiring_3@dcdc.co.in",ROLE_HR,None,"hrrv123"),
-            ("Shivani","recruitments@dcdc.co.in",ROLE_HR,None,"hrsv123"),
-            ("Udita","careers@dcdc.co.in",ROLE_HR,None,"hrud123"),
-            ("Dr. Yasir Anis","clinical_manager@dcdc.co.in",ROLE_MANAGER,None,"yasir123"),
-            ("Ms. Prachi","infectioncontroller@dcdc.co.in",ROLE_INTERVIEWER,None,"prachi123"),
-            ("Mr. Shaikh Saadi","dialysis.coord@dcdc.co.in",ROLE_MANAGER,None,"saadi123"),
-            ("Ms. Pankaja","rmclinical_4@dcdc.co.in",ROLE_INTERVIEWER,None,"pankaja123"),
-            ("Mr. Yekula Bhanu Prakash","rmclinical_6@dcdc.co.in",ROLE_INTERVIEWER,None,"bhanu123"),
-            ("Mr. Rohit","clinical_therapist@dcdc.co.in",ROLE_INTERVIEWER,None,"rohit123"),
+            ("Mr. Parveen Chaudhary","clinicalanalyst@dcdc.co.in",ROLE_ADMIN,None),
+            ("Mr. Deepak Agarwal","drdeepak@dcdc.co.in",ROLE_VP,None),
+            ("Ms. Barkha","jobs@dcdc.co.in",ROLE_HR,None),
+            ("Deepika","hiring@dcdc.co.in",ROLE_HR,None),
+            ("Karishma","hr_hiring@dcdc.co.in",ROLE_HR,None),
+            ("Kajal","hiring_1@dcdc.co.in",ROLE_HR,None),
+            ("Sneha","hiring_2@dcdc.co.in",ROLE_HR,None),
+            ("Ravi","hiring_3@dcdc.co.in",ROLE_HR,None),
+            ("Shivani","recruitments@dcdc.co.in",ROLE_HR,None),
+            ("Udita","careers@dcdc.co.in",ROLE_HR,None),
+            ("Dr. Yasir Anis","clinical_manager@dcdc.co.in",ROLE_MANAGER,None),
+            ("Ms. Prachi","infectioncontroller@dcdc.co.in",ROLE_INTERVIEWER,None),
+            ("Mr. Shaikh Saadi","dialysis.coord@dcdc.co.in",ROLE_MANAGER,None),
+            ("Ms. Pankaja","rmclinical_4@dcdc.co.in",ROLE_INTERVIEWER,None),
+            ("Mr. Yekula Bhanu Prakash","rmclinical_6@dcdc.co.in",ROLE_INTERVIEWER,None),
+            ("Mr. Rohit","clinical_therapist@dcdc.co.in",ROLE_INTERVIEWER,None),
         ]
-        for n,e,r,m,p in seed:
+        seeded_credentials = []
+        for n,e,r,m in seed:
+            temp_pass = secrets.token_urlsafe(8)
             c.execute("INSERT INTO users(name,email,role,manager_id,passcode,created_at) VALUES(?,?,?,?,?,?)",
-                      (n,e,r,m,generate_password_hash(p),now))
+                      (n,e,r,m,generate_password_hash(temp_pass),now))
+            seeded_credentials.append((e, temp_pass))
 
         # Link interviewers to managers
         def uid(em):
@@ -218,6 +226,10 @@ def init_db():
         c.execute("UPDATE users SET manager_id=? WHERE email='infectioncontroller@dcdc.co.in'", (yasir,))
         for em in ("rmclinical_4@dcdc.co.in","rmclinical_6@dcdc.co.in","clinical_therapist@dcdc.co.in"):
             c.execute("UPDATE users SET manager_id=? WHERE email=?", (saadi, em))
+        if seeded_credentials:
+            print("[HMS] Seeded default users with temporary passcodes:")
+            for email, passcode in seeded_credentials:
+                print("   - {} : {}".format(email, passcode))
     conn.commit(); conn.close()
 
     # Ensure new columns exist for older databases
@@ -475,6 +487,7 @@ def brand_logo():
     return Response(b"GIF89a\x01\x00\x01\x00\x80\x00\x00\xff\xff\xff\x00\x00\x00!\xf9\x04\x01\n\x00\x01\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;", mimetype="image/gif")
 
 @app.route("/__unread")
+@login_required
 def __unread():
     u = current_user()
     n = 0
@@ -1655,11 +1668,16 @@ def admin_resets():
             row=cur.fetchone()
             if row:
                 cur.execute("UPDATE users SET passcode=? WHERE email=?", (generate_password_hash(newp),row["user_email"]))
-                cur.execute("""UPDATE password_resets SET state='resolved', resolved_at=?, resolver_id=?, new_passcode=? WHERE id=?""",
-                            (datetime.datetime.utcnow().isoformat(), current_user()["id"], newp, int(rid)))
+                cur.execute("""UPDATE password_resets SET state='resolved', resolved_at=?, resolver_id=?, new_passcode=NULL WHERE id=?""",
+                            (datetime.datetime.utcnow().isoformat(), current_user()["id"], int(rid)))
                 db.commit();
                 try:
-                    send_email(row["user_email"], "HMS New Passcode", "<p>Your new passcode is: <b>{}</b></p>".format(newp))
+                    html = (
+                        "<p>Your passcode has been reset by an administrator.</p>"
+                        "<p>Temporary passcode: <b>{}</b></p>"
+                        "<p>Please sign in and change it immediately.</p>"
+                    ).format(newp)
+                    send_email(row["user_email"], "HMS Passcode Reset", html)
                 except Exception:
                     pass
                 flash("Reset resolved and passcode updated.","message")
