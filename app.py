@@ -3,7 +3,7 @@ from functools import wraps
 
 from flask import (
     Flask, request, redirect, url_for, session, render_template_string,
-    flash, send_from_directory, send_file
+    flash, send_from_directory, send_file, Response
 )
 
 from openpyxl import load_workbook, Workbook
@@ -31,7 +31,7 @@ def send_email(to, subject, html):
         pass
 
 # ------------------------------ App constants --------------------------------
-BUILD_TAG = "HMS-2025-09-17-bell-subnav-remarks-v3"
+BUILD_TAG = "HMS-2025-09-24-fixes-r5"
 
 APP_TITLE = "Hiring Management System (HMS)"
 BASE_DIR = os.path.dirname(__file__)
@@ -54,36 +54,29 @@ ALLOWED_CV_EXTS = {".pdf",".doc",".docx"}
 # ------------------------------- Flask + CSRF --------------------------------
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
-app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16MB
+app.config.update(
+    MAX_CONTENT_LENGTH=16 * 1024 * 1024,  # 16MB
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+)
+# In production behind HTTPS, uncomment:
+# app.config["SESSION_COOKIE_SECURE"] = True
+
+csrf = CSRFProtect(app)
 
 @app.before_first_request
 def _warmup_and_migrate():
     try:
         init_db()
+        migrate_db()
     except Exception as e:
         # Do not crash the app if migrations fail; check server log instead
-        print("init_db() failed:", e)
-
-
-csrf = CSRFProtect(app)
+        print("warmup init/migrate failed:", e)
 
 @app.context_processor
 def inject_csrf():
+    # For templates that want to call {{ csrf_token() }} manually
     return dict(csrf_token=generate_csrf)
-
-# Auto-inject CSRF hidden input into every POST form in HTML responses
-@app.after_request
-def inject_csrf_inputs(response):
-    try:
-        if response.content_type and response.content_type.startswith("text/html"):
-            html = response.get_data(as_text=True)
-            token = generate_csrf()
-            pattern = re.compile(r'(<form\b[^>]*\bmethod=["\']?post["\']?[^>]*>)', re.IGNORECASE)
-            html = pattern.sub(lambda m: m.group(1) + '\n<input type="hidden" name="csrf_token" value="{}">'.format(token), html)
-            response.set_data(html)
-    except Exception:
-        pass
-    return response
 
 # --------------------------------- Database ----------------------------------
 def get_db():
@@ -101,6 +94,10 @@ def ensure_column(table: str, column: str, decl: str):
         db.commit()
     db.close()
 
+def ensure_index(sql: str):
+    db = get_db(); cur = db.cursor()
+    cur.execute(sql)
+    db.commit(); db.close()
 
 def init_db():
     conn = get_db(); c = conn.cursor()
@@ -222,6 +219,7 @@ def init_db():
         for em in ("rmclinical_4@dcdc.co.in","rmclinical_6@dcdc.co.in","clinical_therapist@dcdc.co.in"):
             c.execute("UPDATE users SET manager_id=? WHERE email=?", (saadi, em))
     conn.commit(); conn.close()
+
     # Ensure new columns exist for older databases
     try:
         ensure_column('password_resets', 'token', 'TEXT')
@@ -229,6 +227,20 @@ def init_db():
     except Exception:
         pass
 
+    # Helpful indexes (no-ops if already exist)
+    try:
+        ensure_index("CREATE INDEX IF NOT EXISTS idx_candidates_created_at ON candidates(created_at)")
+        ensure_index("CREATE INDEX IF NOT EXISTS idx_candidates_status ON candidates(status)")
+        ensure_index("CREATE INDEX IF NOT EXISTS idx_candidates_final_decision ON candidates(final_decision)")
+        ensure_index("CREATE INDEX IF NOT EXISTS idx_candidates_hr_join_status ON candidates(hr_join_status)")
+        ensure_index("CREATE INDEX IF NOT EXISTS idx_candidates_post_applied ON candidates(post_applied)")
+        ensure_index("CREATE INDEX IF NOT EXISTS idx_candidates_assigned_region ON candidates(assigned_region)")
+        ensure_index("CREATE INDEX IF NOT EXISTS idx_candidates_created_by ON candidates(created_by)")
+        ensure_index("CREATE INDEX IF NOT EXISTS idx_candidates_manager_owner ON candidates(manager_owner)")
+        ensure_index("CREATE INDEX IF NOT EXISTS idx_candidates_interviewer_id ON candidates(interviewer_id)")
+        ensure_index("CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, is_read, created_at)")
+    except Exception:
+        pass
 
 def migrate_db():
     """Add missing columns if DB created from an older build."""
@@ -251,6 +263,21 @@ def migrate_db():
         c.execute("ALTER TABLE interviews ADD COLUMN edited_from INTEGER")
 
     conn.commit(); conn.close()
+
+    # Also ensure indexes each boot
+    try:
+        ensure_index("CREATE INDEX IF NOT EXISTS idx_candidates_created_at ON candidates(created_at)")
+        ensure_index("CREATE INDEX IF NOT EXISTS idx_candidates_status ON candidates(status)")
+        ensure_index("CREATE INDEX IF NOT EXISTS idx_candidates_final_decision ON candidates(final_decision)")
+        ensure_index("CREATE INDEX IF NOT EXISTS idx_candidates_hr_join_status ON candidates(hr_join_status)")
+        ensure_index("CREATE INDEX IF NOT EXISTS idx_candidates_post_applied ON candidates(post_applied)")
+        ensure_index("CREATE INDEX IF NOT EXISTS idx_candidates_assigned_region ON candidates(assigned_region)")
+        ensure_index("CREATE INDEX IF NOT EXISTS idx_candidates_created_by ON candidates(created_by)")
+        ensure_index("CREATE INDEX IF NOT EXISTS idx_candidates_manager_owner ON candidates(manager_owner)")
+        ensure_index("CREATE INDEX IF NOT EXISTS idx_candidates_interviewer_id ON candidates(interviewer_id)")
+        ensure_index("CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, is_read, created_at)")
+    except Exception:
+        pass
 
 # Initialize/migrate DB at import time (on uWSGI load)
 try:
@@ -304,6 +331,12 @@ def user_email_by_id(uid:int):
 def interviewers_for_manager(mid:int):
     db = get_db(); cur = db.cursor()
     cur.execute("SELECT id,name FROM users WHERE role='interviewer' AND manager_id=? ORDER BY name", (mid,))
+    rows = cur.fetchall(); db.close()
+    return rows
+
+def all_interviewers():
+    db = get_db(); cur = db.cursor()
+    cur.execute("SELECT id,name FROM users WHERE role='interviewer' ORDER BY name")
     rows = cur.fetchall(); db.close()
     return rows
 
@@ -425,6 +458,7 @@ th,td{padding:8px;border-bottom:1px solid #eee;text-align:left}
 </body>
 </html>
 """
+
 def render_page(title, body_html):
     return render_template_string(BASE_HTML, title=title, app_title=APP_TITLE, user=current_user(), body=body_html)
 
@@ -438,7 +472,6 @@ def brand_logo():
     path = os.path.join(BASE_DIR, LOGO_FILENAME)
     if os.path.exists(path):
         return send_from_directory(BASE_DIR, LOGO_FILENAME)
-    from flask import Response
     return Response(b"GIF89a\x01\x00\x01\x00\x80\x00\x00\xff\xff\xff\x00\x00\x00!\xf9\x04\x01\n\x00\x01\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;", mimetype="image/gif")
 
 @app.route("/__unread")
@@ -464,17 +497,19 @@ def login():
         if u and check_password_hash(u["passcode"], passcode):
             session["user_id"]=u["id"]; flash("Welcome!","message"); return redirect(url_for("dashboard"))
         flash("Invalid email or passcode.","error")
+    token = generate_csrf()
     body = """
     <div class="card" style="max-width:520px;margin:48px auto;text-align:center">
       <img src="{}" alt="logo" style="height:60px;margin-bottom:10px" onerror="this.style.display='none'">
       <h2 style="margin:6px 0">Sign in</h2>
       <form method="post" style="text-align:left">
+        <input type="hidden" name="csrf_token" value="{}">
         <label>Email</label><input name="email" required>
         <label>Passcode</label><input name="passcode" type="password" required>
         <div style="margin-top:10px"><button class="btn">Login</button> <a class="btn light" href="{}">Forgot?</a></div>
       </form>
     </div>
-    """.format(url_for('brand_logo'), url_for('forgot_password'))
+    """.format(url_for('brand_logo'), token, url_for('forgot_password'))
     return render_page("Login", body)
 
 @app.route("/logout")
@@ -484,6 +519,13 @@ def logout():
 @app.route("/forgot", methods=["GET","POST"])
 def forgot_password():
     if request.method=="POST":
+        # Defensive: ensure columns exist even if an old DB slipped through
+        try:
+            ensure_column('password_resets', 'token', 'TEXT')
+            ensure_column('password_resets', 'expires_at', 'TEXT')
+        except Exception:
+            pass
+
         email = request.form.get("email","").strip().lower()
         now = datetime.datetime.utcnow()
         token = secrets.token_urlsafe(24)
@@ -491,7 +533,6 @@ def forgot_password():
         db=get_db(); cur=db.cursor()
         cur.execute("SELECT 1 FROM users WHERE email=?", (email,))
         if cur.fetchone():
-            # columns token/expires_at exist thanks to migrate_db()
             cur.execute("INSERT INTO password_resets(user_email,state,created_at,token,expires_at) VALUES(?,?,?,?,?)",
                         (email,"open",now.isoformat(),token,expires))
             db.commit()
@@ -503,16 +544,18 @@ def forgot_password():
         db.close()
         flash("If the email exists, a reset request has been created.","message")
         return redirect(url_for("login"))
+    token = generate_csrf()
     body="""
     <div class="card" style="max-width:420px;margin:48px auto">
       <h3>Forgot Passcode</h3>
       <form method="post">
+        <input type="hidden" name="csrf_token" value="{}">
         <label>Your Email</label><input name="email" required>
         <div style="margin-top:10px"><button class="btn">Create Reset Request</button>
         <a class="btn light" href="{}">Back</a></div>
       </form>
     </div>
-    """.format(url_for('login'))
+    """.format(token, url_for('login'))
     return render_page("Forgot Password", body)
 
 @app.route("/profile", methods=["GET","POST"])
@@ -529,17 +572,19 @@ def profile():
                 db.close(); flash("Old passcode incorrect.","error"); return redirect(url_for("profile"))
             cur.execute("UPDATE users SET passcode=? WHERE id=?", (generate_password_hash(new),u["id"]))
             db.commit(); db.close(); flash("Passcode changed.","message"); return redirect(url_for("dashboard"))
+    token = generate_csrf()
     body="""
     <div class="card" style="max-width:480px;margin:0 auto">
       <h3>My Profile</h3>
       <p><span class="tag">{}</span> &nbsp; <span class="tag">{}</span> &nbsp; <span class="tag">{}</span></p>
       <form method="post">
+        <input type="hidden" name="csrf_token" value="{}">
         <label>Old Passcode</label><input name="old" type="password" required>
         <label>New Passcode</label><input name="new" type="password" required>
         <div style="margin-top:10px"><button class="btn">Update</button></div>
       </form>
     </div>
-    """.format(u['name'], u['email'], u['role'])
+    """.format(u['name'], u['email'], u['role'], token)
     return render_page("Profile", body)
 
 # -------------------------------- Dashboard ----------------------------------
@@ -597,7 +642,7 @@ def dashboard():
         (f"<tr><td>{r['full_name']}</td><td>{r['post_applied']}</td>"
          f"<td><span class='tag'>{r['status']}</span></td>"
          f"<td>{r['final_decision'] or '-'}</td><td>{r['hr_join_status'] or '-'}</td>"
-         f"<td>{r['assigned_region'] or '-'}</td><td>{r['created_at'][:19].replace('T',' ')}</td></tr>")
+         f"<td>{r['assigned_region'] or '-'}</td><td>{(r['created_at'] or '')[:19].replace('T',' ')}</td></tr>")
         for r in recent
     ]) or "<tr><td colspan=7>No candidates match your filters.</td></tr>"
 
@@ -644,7 +689,7 @@ def dashboard():
     </style>
     """
 
-    # ---- SAFE charts: put data into a JSON object and keep the JS as a plain string
+    # ---- Charts
     chart_data = {
         "selected": selected,
         "rejected": rejected,
@@ -758,18 +803,24 @@ def notifications():
     cur.execute("""SELECT id,title,body,is_read,created_at
                    FROM notifications WHERE user_id=? ORDER BY id DESC LIMIT 200""", (u["id"],))
     rows = cur.fetchall(); db.close()
+    token = generate_csrf()
     trs = "".join([
         "<tr><td>{}</td><td><strong>{}</strong><br><div style='white-space:pre-wrap'>{}</div></td>"
-        "<td>{}</td><td><a class='btn' href='{}'>Mark read</a></td></tr>".format(
-            r['created_at'][:19].replace('T',' '), r['title'], (r['body'] or ''), ('Unread' if not r['is_read'] else 'Read'),
-            url_for('mark_notif_read', nid=r['id'])
+        "<td>{}</td><td>"
+        "<form method='post' action='{}' style='display:inline'>"
+        "<input type='hidden' name='csrf_token' value='{}'>"
+        "<button class='btn'>Mark read</button></form>"
+        "</td></tr>".format(
+            (r['created_at'] or '')[:19].replace('T',' '), r['title'], (r['body'] or ''),
+            ('Unread' if not r['is_read'] else 'Read'),
+            url_for('mark_notif_read', nid=r['id']), token
         )
         for r in rows
     ]) or "<tr><td colspan=4>No notifications</td></tr>"
     body = "<div class='card'><h3>Notifications</h3><table><thead><tr><th>Time</th><th>Message</th><th>Status</th><th></th></tr></thead><tbody>{}</tbody></table></div>".format(trs)
     return render_page("Notifications", body)
 
-@app.route("/notifications/read/<int:nid>")
+@app.route("/notifications/read/<int:nid>", methods=["POST"])
 @login_required
 def mark_notif_read(nid):
     u=current_user(); db=get_db(); cur=db.cursor()
@@ -834,22 +885,21 @@ def candidates_all():
         else:
             cv_html = '-'
 
-    rows_html_list.append(
-        f"<tr>"
-        f"<td>{r['candidate_code'] or '-'}</td>"
-        f"<td>{r['full_name']}</td>"
-        f"<td>{r['post_applied']}</td>"
-        f"<td><span class='tag'>{r['status']}</span></td>"
-        f"<td>{r['final_decision'] or '-'}</td>"
-        f"<td>{r['hr_join_status'] or '-'}</td>"
-        f"<td>{r['created_at'][:19].replace('T',' ')}</td>"
-        f"<td>{cv_html}</td>"
-        f"<td>{actions(r)}</td>"
-        f"</tr>"
-    )
+        rows_html_list.append(
+            f"<tr>"
+            f"<td>{r['candidate_code'] or '-'}</td>"
+            f"<td>{r['full_name']}</td>"
+            f"<td>{r['post_applied']}</td>"
+            f"<td><span class='tag'>{r['status']}</span></td>"
+            f"<td>{r['final_decision'] or '-'}</td>"
+            f"<td>{r['hr_join_status'] or '-'}</td>"
+            f"<td>{(r['created_at'] or '')[:19].replace('T',' ')}</td>"
+            f"<td>{cv_html}</td>"
+            f"<td>{actions(r)}</td>"
+            f"</tr>"
+        )
 
-rows_html = "".join(rows_html_list) or "<tr><td colspan=9>No data</td></tr>"
-
+    rows_html = "".join(rows_html_list) or "<tr><td colspan=9>No data</td></tr>"
 
     chips = ""
     if current_user()['role'] in (ROLE_MANAGER, ROLE_ADMIN):
@@ -967,6 +1017,7 @@ def add_candidate():
         flash("Candidate added (ID: {}).".format(fields['candidate_code']),"message")
         return redirect(url_for("dashboard"))
 
+    token = generate_csrf()
     default_code = next_candidate_code()
     options="".join(["<option>{}</option>".format(p) for p in POSTS])
     body="""
@@ -977,6 +1028,7 @@ def add_candidate():
       </div>
 
       <form id="addForm" method="post" enctype="multipart/form-data">
+        <input type="hidden" name="csrf_token" value="{}">
         <div class="card section blue">
           <h4>Identity & Contact</h4>
           <div class="grid-2">
@@ -1042,7 +1094,7 @@ def add_candidate():
         </div>
       </form>
     </div>
-    """.format(default_code, options, url_for('dashboard'))
+    """.format(token, default_code, options, url_for('dashboard'))
     return render_page("Add Candidate", body)
 
 # ----------------------- Manager: assign interviewer --------------------------
@@ -1070,19 +1122,21 @@ def assign_candidate(candidate_id):
             notify(c["created_by"], "Candidate Assigned", "{} assigned to interviewer (ID {}).".format(c['full_name'], iid))
         flash("Assigned to interviewer.","message"); return redirect(url_for("candidates_all"))
 
-    ivs = interviewers_for_manager(u["id"])
+    ivs = interviewers_for_manager(u["id"]) if u["role"] != ROLE_ADMIN else all_interviewers()
     opts = "".join(["<option value='{}' {}>{}</option>".format(i['id'], "selected" if c['interviewer_id']==i['id'] else "", i['name']) for i in ivs]) or "<option disabled>No interviewers</option>"
+    token = generate_csrf()
     body="""
     <div class="card" style="max-width:600px;margin:0 auto">
       <h3>Assign Interviewer</h3>
-      <p><strong>{}</strong> — <span class="tag">{}</span></p>
+      <p><strong>{}</strong> — <span class='tag'>{}</span></p>
       <form method="post">
+        <input type="hidden" name="csrf_token" value="{}">
         <label>Interviewer</label>
         <select name="interviewer_id">{}</select>
         <div style="margin-top:10px"><button class="btn">Save</button> <a class="btn light" href="{}">Back</a></div>
       </form>
     </div>
-    """.format(c['full_name'], c['post_applied'], opts, url_for('candidates_all'))
+    """.format(c['full_name'], c['post_applied'], token, opts, url_for('candidates_all'))
     return render_page("Assign Interviewer", body)
 
 @app.route("/assign/bulk", methods=["GET", "POST"])
@@ -1106,7 +1160,7 @@ def bulk_assign():
         """, args)
         rows = cur.fetchall()
 
-        ivs = interviewers_for_manager(u["id"]) if u["role"] != ROLE_ADMIN else []
+        ivs = interviewers_for_manager(u["id"]) if u["role"] != ROLE_ADMIN else all_interviewers()
         iv_opts = "".join([f"<option value='{i['id']}'>{i['name']}</option>" for i in ivs]) if ivs else ""
 
         trs = "".join([
@@ -1121,7 +1175,7 @@ def bulk_assign():
             for r in rows
         ]) or "<tr><td colspan='6'>No candidates available for bulk assignment.</td></tr>"
 
-        # Plain JS string (no f-string) to avoid brace problems
+        # Plain JS string (no f-string) to avoid {{ }} / arrow-function issues
         bulk_js = """
         <script>
         function ckAll(cb){
@@ -1129,11 +1183,12 @@ def bulk_assign():
         }
         </script>
         """
-
+        token = generate_csrf()
         body = f"""
         <div class="card" style="max-width:960px;margin:0 auto">
           <h3>Bulk Assign Candidates</h3>
           <form method="post">
+            <input type="hidden" name="csrf_token" value="{token}">
             <div class="row" style="margin-bottom:10px">
               <div class="col">
                 <label>Assign to Interviewer</label>
@@ -1264,12 +1319,14 @@ def interview_feedback(candidate_id):
     if last:
         edit_toggle = "<div class='badge'>You have previous feedback; you may edit it. Use the selector below.</div>"
 
+    token = generate_csrf()
     body = """
     <div class="card" style="max-width:760px;margin:0 auto">
       <h3>Interviewer Feedback</h3>
-      <p><strong>{}</strong> — <span class="tag">{}</span></p>
+      <p><strong>{}</strong> — <span class='tag'>{}</span></p>
       {}
       <form method="post">
+        <input type="hidden" name="csrf_token" value="{}">
         <div class="row">
           <div class="col"><label>Rating (1-5)</label><input name="rating" placeholder="e.g. 4"></div>
         </div>
@@ -1295,7 +1352,7 @@ def interview_feedback(candidate_id):
       <h4>Previous Decisions (latest first)</h4>
       {}
     </div>
-    """.format(c['full_name'], c['post_applied'], edit_toggle, url_for('candidates_all'), history_html)
+    """.format(c['full_name'], c['post_applied'], edit_toggle, token, url_for('candidates_all'), history_html)
     db.close()
     return render_page("Interviewer Feedback", body)
 
@@ -1376,12 +1433,14 @@ def finalize_candidate(candidate_id):
 
         flash("Final decision updated.","message"); return redirect(url_for("dashboard"))
 
+    token = generate_csrf()
     body="""
     <div class="card" style="max-width:720px;margin:0 auto">
       <h3>Finalize Candidate</h3>
-      <p><strong>{}</strong> — <span class="tag">{}</span></p>
+      <p><strong>{}</strong> — <span class='tag'>{}</span></p>
       {}
       <form method="post">
+        <input type="hidden" name="csrf_token" value="{}">
         <label>Final Remark</label><textarea name="remark" rows="4"></textarea>
         <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
           <button name="action" value="select" class="btn">Select</button>
@@ -1391,12 +1450,12 @@ def finalize_candidate(candidate_id):
         </div>
       </form>
     </div>
-    """.format(c['full_name'], c['post_applied'], last_block, url_for('dashboard'))
+    """.format(c['full_name'], c['post_applied'], last_block, token, url_for('dashboard'))
     return render_page("Finalize", body)
 
 @app.route("/hr/queue")
 @login_required
-@role_required(ROLE_HR, ROLE_ADMIN)
+@role_required(ROLE_HR,ROLE_ADMIN)
 def hr_join_queue():
     u = current_user(); db = get_db(); cur = db.cursor()
 
@@ -1489,18 +1548,20 @@ def hr_join_update(candidate_id):
         flash("Join status updated.","message")
         return redirect(url_for("dashboard"))
 
+    token = generate_csrf()
     body = """
     <div class="card" style="max-width:700px;margin:0 auto">
       <h3>HR: Mark Join Status</h3>
       <div class="card section blue">
         <h4>Candidate</h4>
-        <p><strong>{}</strong> — <span class="tag">{}</span></p>
+        <p><strong>{}</strong> — <span class='tag'>{}</span></p>
         <p>Manager: <strong>{}</strong></p>
         <p>Finalized By: <strong>{}</strong></p>
         <p>Final Remark: <span style="white-space:pre-wrap">{}</span></p>
       </div>
 
       <form method="post">
+        <input type="hidden" name="csrf_token" value="{}">
         <label>Status</label>
         <select name="status" id="status" onchange="toggleReason()">
           <option value="joined">Joined</option>
@@ -1519,12 +1580,10 @@ def hr_join_update(candidate_id):
       </form>
     </div>
     <script>
-    function toggleReason(){
-      var st = document.getElementById('status').value;
-      document.getElementById('reasonBox').style.display = (st === 'not_joined') ? 'block' : 'none';
-    }
+    function toggleReason(){ var st = document.getElementById('status').value;
+      document.getElementById('reasonBox').style.display = (st === 'not_joined') ? 'block' : 'none'; }
     </script>
-    """.format(c['full_name'], c['post_applied'], manager_name, finalized_by_name, (c['final_remark'] or '-'), url_for('hr_join_queue'))
+    """.format(c['full_name'], c['post_applied'], manager_name, finalized_by_name, (c['final_remark'] or '-'), token, url_for('hr_join_queue'))
     return render_page("HR Join Update", body)
 
 # ---------------------------------- Admin ------------------------------------
@@ -1556,10 +1615,12 @@ def admin_users():
     opts_mgr="<option value=''>—</option>" + "".join(["<option value='{}'>{}</option>".format(m['id'], m['name']) for m in mgrs])
     rows="".join(["<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>".format(u['id'],u['name'],u['email'],u['role'],u['manager_id'] or '-') for u in users])
     db.close()
+    token = generate_csrf()
     body="""
     <div class="card">
       <h3>Add User</h3>
       <form method="post">
+        <input type="hidden" name="csrf_token" value="{}">
         <div class="row">
           <div class="col"><label>Name</label><input name="name" required></div>
           <div class="col"><label>Email</label><input name="email" required></div>
@@ -1579,7 +1640,7 @@ def admin_users():
       <h3>Password Reset Requests</h3>
       <p><a class="btn" href="{}">Manage Resets</a></p>
     </div>
-    """.format(opts_role, opts_mgr, rows or '<tr><td colspan=5>No users</td></tr>', url_for('admin_resets'))
+    """.format(token, opts_role, opts_mgr, rows or '<tr><td colspan=5>No users</td></tr>', url_for('admin_resets'))
     return render_page("Admin: Users", body)
 
 @app.route("/admin/resets", methods=["GET","POST"])
@@ -1611,10 +1672,11 @@ def admin_resets():
     rows=cur.fetchall(); db.close()
     def tr(r):
         return "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>".format(
-            r['id'], r['user_email'], r['state'], r['created_at'][:19].replace('T',' '),
-            r['resolved_at'][:19].replace('T',' ') if r['resolved_at'] else '-'
+            r['id'], r['user_email'], r['state'], (r['created_at'] or '')[:19].replace('T',' '),
+            (r['resolved_at'] or '')[:19].replace('T',' ') if r['resolved_at'] else '-'
         )
     table="".join([tr(r) for r in rows]) or "<tr><td colspan=5>No requests</td></tr>"
+    token = generate_csrf()
     body="""
     <div class="card">
       <h3>Password Reset Requests</h3>
@@ -1624,12 +1686,13 @@ def admin_resets():
     <div class="card" style="max-width:560px">
       <h3>Resolve a Request</h3>
       <form method="post">
+        <input type="hidden" name="csrf_token" value="{}">
         <label>Request ID</label><input name="rid" required>
         <label>New Passcode</label><input name="new" required>
         <div style="margin-top:10px"><button class="btn">Set New Passcode</button> <a class="btn light" href="{}">Back</a></div>
       </form>
     </div>
-    """.format(table, url_for('admin_users'))
+    """.format(table, token, url_for('admin_users'))
     return render_page("Admin: Reset Requests", body)
 
 # --------------------------------- Bulk upload --------------------------------
@@ -1713,26 +1776,28 @@ def bulk_upload():
 
             db.commit(); db.close()
             flash("Bulk upload complete. Inserted {}. Skipped {} (bad name/post), {} (invalid phone).".format(inserted,bad_post_or_name,bad_phone),"message")
-            return redirect(url_for("candidates_all"))
+            return redirect(url_for('candidates_all'))
         except Exception as e:
-            flash("Upload failed: {}. Supported format: .xlsx".format(e),"error"); return redirect(url_for("bulk_upload"))
+            flash("Upload failed: {}. Supported format: .xlsx".format(e),"error"); return redirect(url_for('bulk_upload'))
 
     sample_cols = ", ".join([
         "Candidate Id","Salutation","Name","Email","Qualification","Experience (years)","Current designation",
         "Mobile No.","Current Salary","Expected Salary","Current Location","Preferred location","Post applied",
         "Interview Date","Current/Previous company","Region","Status","remarks"
     ])
+    token = generate_csrf()
     body="""
     <div class="card" style="max-width:700px;margin:0 auto">
       <h3>Bulk Upload (Excel .xlsx)</h3>
       <p>Expected columns: <span class="tag">{}</span></p>
       <p><a class="btn light" href="{}">Download Sample Excel</a></p>
       <form method="post" enctype="multipart/form-data">
+        <input type="hidden" name="csrf_token" value="{}">
         <label>Choose .xlsx file</label><input type="file" name="xlsx" accept=".xlsx" required>
         <div style="margin-top:10px"><button class="btn">Upload</button> <a class="btn light" href="{}">Back</a></div>
       </form>
     </div>
-    """.format(sample_cols, url_for('bulk_sample'), url_for('candidates_all'))
+    """.format(sample_cols, url_for('bulk_sample'), token, url_for('candidates_all'))
     return render_page("Bulk Upload", body)
 
 # --------------------------------- Run (dev) ---------------------------------
