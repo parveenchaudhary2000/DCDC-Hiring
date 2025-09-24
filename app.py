@@ -651,14 +651,7 @@ def dashboard():
                     FROM candidates WHERE {WHERE}
                     ORDER BY datetime(created_at) DESC LIMIT 20""", args)
     recent = cur.fetchall()
-    recent_rows = "".join([
-        (f"<tr><td>{r['full_name']}</td><td>{r['post_applied']}</td>"
-         f"<td><span class='tag'>{r['status']}</span></td>"
-         f"<td>{r['final_decision'] or '-'}</td><td>{r['hr_join_status'] or '-'}</td>"
-         f"<td>{r['assigned_region'] or '-'}</td><td>{(r['created_at'] or '')[:19].replace('T',' ')}</td></tr>")
-        for r in recent
-    ]) or "<tr><td colspan=7>No candidates match your filters.</td></tr>"
-
+    if q_post: where.append("post_applied=?"); args.append(q_post)
     cur.execute(f"SELECT COALESCE(final_decision,'(no final)') k, COUNT(*) c FROM candidates WHERE {WHERE} GROUP BY k ORDER BY c DESC", args)
     status_rows = cur.fetchall()
     cur.execute(f"SELECT COALESCE(NULLIF(assigned_region,''),'(Unassigned)') k, COUNT(*) c FROM candidates WHERE {WHERE} GROUP BY k ORDER BY c DESC", args)
