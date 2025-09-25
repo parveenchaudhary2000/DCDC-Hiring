@@ -954,7 +954,7 @@ def candidates_all():
             f"<td>{h((r['created_at'] or '')[:19].replace('T',' '))}</td>"
             f"<td>{cv_html}</td>"
             f"<td>{actions(r)}</td>"
-            f"</tr>"
+            f"<tr>"
         )
 
     rows_html = "".join(rows_html_list) or "<tr><td colspan=9>No data</td></tr>"
@@ -1231,7 +1231,8 @@ def bulk_assign():
             f"<td>{h(r['post_applied'])}</td>"
             f"<td><span class='tag'>{h(r['status'])}</span></td>"
             f"<td>{h(r['current_iv'])}</td>"
-            f"</tr>"
+            f"<tr>"
+            
             for r in rows
         ]) or "<tr><td colspan='6'>No candidates available for bulk assignment.</td></tr>"
 
