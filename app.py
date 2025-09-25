@@ -127,10 +127,9 @@ def ensure_index(sql: str):
 
 def init_db():
     conn = get_db(); c = conn.cursor()
-try:
-    conn.execute("PRAGMA journal_mode=WAL")
-except Exception:
-    pass
+if os.environ.get("SQLITE_JOURNAL", "").upper() == "WAL":
+    try: conn.execute("PRAGMA journal_mode=WAL")
+    except Exception: pass
     
     c.execute("""
     CREATE TABLE IF NOT EXISTS users(
