@@ -1224,15 +1224,16 @@ def bulk_assign():
         iv_opts = "".join([f"<option value='{i['id']}'>{i['name']}</option>" for i in ivs]) if ivs else ""
 
         trs = "".join([
-            f"<tr>"
-            f"<td><input type='checkbox' name='ids' value='{r['id']}'></td>"
-            f"<td>{h(r['candidate_code'] or '-')}</td>"
-            f"<td>{h(r['full_name'])}</td>"
-            f"<td>{h(r['post_applied'])}</td>"
-            f"<td><span class='tag'>{h(r['status'])}</span></td>"
-            f"<td>{h(r['current_iv'])}</td>"
-            "</tr>"
-            
+            f"""
+            <tr>
+              <td><input type='checkbox' name='ids' value='{r['id']}'></td>
+              <td>{h(r['candidate_code'] or '-')}</td>
+              <td>{h(r['full_name'])}</td>
+              <td>{h(r['post_applied'])}</td>
+              <td><span class='tag'>{h(r['status'])}</span></td>
+              <td>{h(r['current_iv'])}</td>
+            </tr>
+            """
             for r in rows
         ]) or "<tr><td colspan='6'>No candidates available for bulk assignment.</td></tr>"
 
