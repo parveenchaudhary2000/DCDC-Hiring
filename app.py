@@ -7,6 +7,7 @@ from flask import (
 )
 
 from openpyxl import load_workbook, Workbook
+from urllib.parse import urlencode
 
 # Security & CSRF
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -76,7 +77,8 @@ app.config.update(
     SESSION_COOKIE_SAMESITE="Lax",
 )
 # In production behind HTTPS, uncomment:
-app.config["SESSION_COOKIE_SECURE"] = True
+if os.environ.get("FLASK_ENV") == "production" or not app.debug:
+    app.config["SESSION_COOKIE_SECURE"] = True
 
 csrf = CSRFProtect(app)
 @app.after_request
@@ -101,12 +103,12 @@ def inject_csrf():
 def get_db():
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
+    # Enforce FK constraints on every connection
+    try:
+        conn.execute("PRAGMA foreign_keys=ON")
+    except Exception:
+        pass
     return conn
-
-# in init_db()
-c.execute("PRAGMA journal_mode=WAL")
-c.execute("PRAGMA foreign_keys=ON")
-
 
 def ensure_column(table: str, column: str, decl: str):
     """Add a column if it does not exist (SQLite)."""
@@ -125,7 +127,11 @@ def ensure_index(sql: str):
 
 def init_db():
     conn = get_db(); c = conn.cursor()
-
+try:
+    conn.execute("PRAGMA journal_mode=WAL")
+except Exception:
+    pass
+    
     c.execute("""
     CREATE TABLE IF NOT EXISTS users(
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -674,12 +680,14 @@ def dashboard():
                     ORDER BY datetime(created_at) DESC LIMIT 20""", args)
     recent = cur.fetchall()
     recent_rows = "".join([
-        (f"<tr><td>{h(r['full_name'])}</td><td>{h(r['post_applied'])}</td>"
-         f"<td><span class='tag'>{h(r['status'])}</span></td>"
-         f"<td>{h(r['final_decision'] or '-')}</td><td>{h(r['hr_join_status'] or '-')}</td>"
-         f"<td>{h(r['assigned_region'] or '-')}</td><td>{h((r['created_at'] or '')[:19].replace('T',' '))}</td></tr>")
-    
-        for r in recent
+            (
+                f"<tr><td>{h(r['full_name'])}</td><td>{h(r['post_applied'])}</td>"
+                f"<td><span class='tag'>{h(r['status'])}</span></td>"
+                f"<td>{h(r['final_decision'] or '-')}</td><td>{h(r['hr_join_status'] or '-')}</td>"
+                f"<td>{h(r['assigned_region'] or '-')}</td>"
+                f"<td>{h((r['created_at'] or '')[:19].replace('T',' '))}</td></tr>"
+            )
+            for r in recent
         ]) or "<tr><td colspan=7>No candidates match your filters.</td></tr>"
 
         
@@ -710,9 +718,12 @@ def dashboard():
 
     opts_status = "".join([f"<option value='{s}' {'selected' if q_status==s else ''}>{s or 'All'}</option>"
                            for s in ["","Pending","Assigned","reinterview","finalized","Selected","Rejected","Joined"]])
-    opts_post = "<option value=''>All</option>" + "".join([f"<option value='{p}' {'selected' if q_post==p else ''}>{p}</option>" for p in posts])
-    opts_region = "<option value=''>All</option>" + "".join([f"<option value='{r}' {'selected' if q_region==r else ''}>{r}</option>" for r in regions])
-
+    opts_post = "<option value=''>All</option>" + "".join([
+        f"<option value='{h(p)}' {'selected' if q_post==p else ''}>{h(p)}</option>" for p in posts
+    ])
+    opts_region = "<option value=''>All</option>" + "".join([
+        f"<option value='{h(r)}' {'selected' if q_region==r else ''}>{h(r)}</option>" for r in regions
+    ])
     page_css = """
     <style>
     .dash-grid{display:grid;grid-template-columns:1fr;gap:14px}
@@ -812,8 +823,8 @@ def dashboard():
           <div><label>Status</label><select name="status">{opts_status}</select></div>
           <div><label>Post</label><select name="post">{opts_post}</select></div>
           <div><label>Region</label><select name="region">{opts_region}</select></div>
-          <div><label>From</label><input type="date" name="from" value="{q_from}"></div>
-          <div><label>To</label><input type="date" name="to" value="{q_to}"></div>
+          <div><label>From</label><input type="date" name="from" value="{h(q_from)}"></div>
+          <div><label>To</label><input type="date" name="to" value="{h(q_to)}"></div>
         </div>
         <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
           <button class="btn">Apply Filters</button>
@@ -846,22 +857,25 @@ def notifications():
     rows = cur.fetchall(); db.close()
     token = generate_csrf()
     trs = "".join([
-        tr = "<tr><td>{}</td><td><strong>{}</strong><br><div style='white-space:pre-wrap'>{}</div></td>" \
-             "<td>{}</td><td>" \
-             "<form method='post' action='{}' style='display:inline'>" \
-             "<input type='hidden' name='csrf_token' value='{}'>" \
-             "<button class='btn'>Mark read</button></form>" \
-             "</td></tr>".format(
-                 h((r['created_at'] or '')[:19].replace('T',' ')),
-                 h(r['title']),
-                 h(r['body'] or ''),
-                 ('Unread' if not r['is_read'] else 'Read'),
-                 url_for('mark_notif_read', nid=r['id']),
-                 token
-             )
-
+        (
+            "<tr><td>{}</td><td><strong>{}</strong><br>"
+            "<div style='white-space:pre-wrap'>{}</div></td>"
+            "<td>{}</td><td>"
+            "<form method='post' action='{}' style='display:inline'>"
+            "<input type='hidden' name='csrf_token' value='{}'>"
+            "<button class='btn'>Mark read</button></form>"
+            "</td></tr>"
+        ).format(
+            h((r['created_at'] or '')[:19].replace('T',' ')),
+            h(r['title']),
+            h(r['body'] or ''),
+            ('Unread' if not r['is_read'] else 'Read'),
+            url_for('mark_notif_read', nid=r['id']),
+            token
+        )
         for r in rows
     ]) or "<tr><td colspan=4>No notifications</td></tr>"
+        
     body = "<div class='card'><h3>Notifications</h3><table><thead><tr><th>Time</th><th>Message</th><th>Status</th><th></th></tr></thead><tbody>{}</tbody></table></div>".format(trs)
     return render_page("Notifications", body)
 
@@ -951,10 +965,12 @@ def candidates_all():
         chips = "<div style='margin:6px 0'>"
         chips += '<a class="chip" href="{}">All</a>'.format(url_for('candidates_all'))
         for p in all_posts:
-            chips += '<a class="chip" href="{}">{}</a>'.format(url_for('candidates_all') + "?post=" + p.replace(" ","%20"), p)
-        chips += "</div>"
+            chips += '<a class="chip" href="{}">{}</a>'.format(
+                url_for('candidates_all') + "?" + urlencode({"post": p}),
+                h(p)
+            )
         if post_filter:
-            chips += "<div class='badge'>Filtering by post: <b>{}</b></div>".format(post_filter)
+            chips += "<div class='badge'>Filtering by post: <b>{}</b></div>".format(h(post_filter))
 
     body = """
     <div class="card"><h3>All Candidates</h3>
@@ -1211,11 +1227,11 @@ def bulk_assign():
         trs = "".join([
             f"<tr>"
             f"<td><input type='checkbox' name='ids' value='{r['id']}'></td>"
-            f"<td>{r['candidate_code'] or '-'}</td>"
-            f"<td>{r['full_name']}</td>"
-            f"<td>{r['post_applied']}</td>"
-            f"<td><span class='tag'>{r['status']}</span></td>"
-            f"<td>{r['current_iv']}</td>"
+            f"<td>{h(r['candidate_code'] or '-')}</td>"
+            f"<td>{h(r['full_name'])}</td>"
+            f"<td>{h(r['post_applied'])}</td>"
+            f"<td><span class='tag'>{h(r['status'])}</span></td>"
+            f"<td>{h(r['current_iv'])}</td>"
             f"</tr>"
             for r in rows
         ]) or "<tr><td colspan='6'>No candidates available for bulk assignment.</td></tr>"
@@ -1350,14 +1366,17 @@ def interview_feedback(candidate_id):
     hist = cur.fetchall()
     if hist:
         items = []
-        for h in hist:
-            tag = "EDIT" if h["is_edit"] else ("RE-INT" if h["is_reinterview"] else "NEW")
+        for row in hist:
+            tag = "EDIT" if row["is_edit"] else ("RE-INT" if row["is_reinterview"] else "NEW")
             items.append(
                 "<div class='card'><b>{}</b> — {} &nbsp; <span class='tag'>{}</span><br>"
                 "Rating: {}<br><div style='white-space:pre-wrap'>{}</div></div>".format(
-                    h["iv_name"], h["decision"], tag, h["rating"] or '-', (h["feedback"] or '').strip() or '-'
+                    h(row["iv_name"]), h(row["decision"]), h(tag),
+                    h(row["rating"] or '-'),
+                    h((row["feedback"] or '').strip() or '-')
                 )
             )
+
         history_html = "<div>{}</div>".format("".join(items))
 
     edit_toggle = ""
@@ -1420,16 +1439,21 @@ def finalize_candidate(candidate_id):
     last_block = "<p>No interview yet.</p>"
     if last2:
         cards=[]
-        for idx,h in enumerate(last2, start=1):
-            tag = "EDIT" if h["is_edit"] else ("RE-INT" if h["is_reinterview"] else "NEW")
+        for idx,row in enumerate(last2, start=1):
+            tag = "EDIT" if row["is_edit"] else ("RE-INT" if row["is_reinterview"] else "NEW")
             cards.append(
                 "<div class='card'><strong>{} #{}</strong><br>By: {}<br>Rating: {} / 5<br>"
                 "Decision: {} <span class='tag'>{}</span><br>"
                 "Notes:<div style='white-space:pre-wrap'>{}</div></div>".format(
-                    "Entry", idx, h(h['interviewer_name']), h(h['rating'] or '-'),
-                    h(h['decision']), h(tag), h((h['feedback'] or '').strip() or '-')
+                    "Entry", idx,
+                    h(row['interviewer_name']),
+                    h(row['rating'] or '-'),
+                    h(row['decision']),
+                    h(tag),
+                    h((row['feedback'] or '').strip() or '-')
                 )
             )
+
         last_block = "".join(cards)
 
     if request.method=="POST":
@@ -1536,11 +1560,16 @@ def hr_join_queue():
           <td style="white-space:pre-wrap">{}</td><td>{}</td>
           <td><a class="btn" href="{}">Mark Join</a></td>
         </tr>
-        """.format(
-            r['full_name'], r['post_applied'], r['finalized_by_name'] or '-',
-            r['final_remark'], r['finalized_at'] or '-', url_for('hr_join_update', candidate_id=r['id'])
-        ) for r in rows
-    ])
+        .format(
+            h(r['full_name']),
+            h(r['post_applied']),
+            h(r['finalized_by_name'] or '-'),
+            h(r['final_remark']),
+            h(r['finalized_at'] or '-'),
+            url_for('hr_join_update', candidate_id=r['id'])
+        ) 
+            for r in rows
+        ])
 
     body = """
     <div class="card">
