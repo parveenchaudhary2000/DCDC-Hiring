@@ -42,7 +42,7 @@ BUILD_TAG = "HMS-2025-09-24-fixes-r5"
 
 APP_TITLE = "Hiring Management System (HMS)"
 BASE_DIR = os.path.dirname(__file__)
-DB_PATH = os.path.join(BASE_DIR, "hms.db")
+DB_PATH = "/home/dcdchiringsystem/DCDC-Hiring/hms.db"
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
@@ -127,9 +127,12 @@ def ensure_index(sql: str):
 
 def init_db():
     conn = get_db(); c = conn.cursor()
-if os.environ.get("SQLITE_JOURNAL", "").upper() == "WAL":
-    try: conn.execute("PRAGMA journal_mode=WAL")
-    except Exception: pass
+    if os.environ.get("SQLITE_JOURNAL", "").upper() == "WAL":
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+        except Exception:
+            pass
+
     
     c.execute("""
     CREATE TABLE IF NOT EXISTS users(
@@ -679,20 +682,17 @@ def dashboard():
                     ORDER BY datetime(created_at) DESC LIMIT 20""", args)
     recent = cur.fetchall()
     recent_rows = "".join([
-            (
-                f"<tr><td>{h(r['full_name'])}</td><td>{h(r['post_applied'])}</td>"
-                f"<td><span class='tag'>{h(r['status'])}</span></td>"
-                f"<td>{h(r['final_decision'] or '-')}</td><td>{h(r['hr_join_status'] or '-')}</td>"
-                f"<td>{h(r['assigned_region'] or '-')}</td>"
-                f"<td>{h((r['created_at'] or '')[:19].replace('T',' '))}</td></tr>"
-            )
-            for r in recent
-        ]) or "<tr><td colspan=7>No candidates match your filters.</td></tr>"
-
-        
-        
+        (
+            f"<tr><td>{h(r['full_name'])}</td><td>{h(r['post_applied'])}</td>"
+            f"<td><span class='tag'>{h(r['status'])}</span></td>"
+            f"<td>{h(r['final_decision'] or '-')}</td><td>{h(r['hr_join_status'] or '-')}</td>"
+            f"<td>{h(r['assigned_region'] or '-')}</td>"
+            f"<td>{h((r['created_at'] or '')[:19].replace('T',' '))}</td></tr>"
+        )
         for r in recent
     ]) or "<tr><td colspan=7>No candidates match your filters.</td></tr>"
+
+
 
     cur.execute(f"SELECT COALESCE(final_decision,'(no final)') k, COUNT(*) c FROM candidates WHERE {WHERE} GROUP BY k ORDER BY c DESC", args)
     status_rows = cur.fetchall()
@@ -954,7 +954,7 @@ def candidates_all():
             f"<td>{h((r['created_at'] or '')[:19].replace('T',' '))}</td>"
             f"<td>{cv_html}</td>"
             f"<td>{actions(r)}</td>"
-            f"<tr>"
+            "</tr>"
         )
 
     rows_html = "".join(rows_html_list) or "<tr><td colspan=9>No data</td></tr>"
@@ -1231,7 +1231,7 @@ def bulk_assign():
             f"<td>{h(r['post_applied'])}</td>"
             f"<td><span class='tag'>{h(r['status'])}</span></td>"
             f"<td>{h(r['current_iv'])}</td>"
-            f"<tr>"
+            "</tr>"
             
             for r in rows
         ]) or "<tr><td colspan='6'>No candidates available for bulk assignment.</td></tr>"
@@ -1240,7 +1240,7 @@ def bulk_assign():
         bulk_js = """
         <script>
         function ckAll(cb){
-          document.querySelectorAll("input[name='ids']").forEach(function(el){ el.checked = cb.checked; });
+          document.querySelectorAll("input[name='ids']").forEach(el => { el.checked = cb.checked; });
         }
         </script>
         """
@@ -1554,22 +1554,18 @@ def hr_join_queue():
         return render_page("HR Actions", body)
 
     trs = "".join([
-        """
+        f"""
         <tr>
-          <td>{}</td><td>{}</td><td>{}</td>
-          <td style="white-space:pre-wrap">{}</td><td>{}</td>
-          <td><a class="btn" href="{}">Mark Join</a></td>
+          <td>{h(r['full_name'])}</td>
+          <td>{h(r['post_applied'])}</td>
+          <td>{h(r['finalized_by_name'] or '-')}</td>
+          <td style="white-space:pre-wrap">{h(r['final_remark'])}</td>
+          <td>{h(r['finalized_at'] or '-')}</td>
+          <td><a class="btn" href="{url_for('hr_join_update', candidate_id=r['id'])}">Mark Join</a></td>
         </tr>
-        .format(
-            h(r['full_name']),
-            h(r['post_applied']),
-            h(r['finalized_by_name'] or '-'),
-            h(r['final_remark']),
-            h(r['finalized_at'] or '-'),
-            url_for('hr_join_update', candidate_id=r['id'])
-        ) 
-            for r in rows
-        ])
+        """
+        for r in rows
+    ]) or "<tr><td colspan=6>No candidates found.</td></tr>"
 
     body = """
     <div class="card">
