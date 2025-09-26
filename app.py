@@ -38,7 +38,7 @@ def send_email(to, subject, html):
         pass
 
 # ------------------------------ App constants --------------------------------
-BUILD_TAG = "HMS-2025-09-24-fixes-r5"
+BUILD_TAG = "HMS-2025-09-26-csrf-fix-r6"
 
 APP_TITLE = "Hiring Management System (HMS)"
 BASE_DIR = os.path.dirname(__file__)
@@ -71,17 +71,25 @@ ALLOWED_CV_EXTS = {".pdf",".doc",".docx"}
 # ------------------------------- Flask + CSRF --------------------------------
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
-app.config.update(
-    MAX_CONTENT_LENGTH=16 * 1024 * 1024,  # 16MB
-    SESSION_COOKIE_HTTPONLY=True,
-    SESSION_COOKIE_SAMESITE="Lax",
-)
+app.config.update({
+    'MAX_CONTENT_LENGTH': 16 * 1024 * 1024,  # 16MB
+    'SESSION_COOKIE_HTTPONLY': True,
+    'SESSION_COOKIE_SAMESITE': 'Lax',
+    'WTF_CSRF_SSL_STRICT': False,  # Allow missing Referer
+    'WTF_CSRF_CHECK_DEFAULT': False,  # CRITICAL: Disable default CSRF checking
+    'WTF_CSRF_TIME_LIMIT': None,  # No time limit
+})
 # In production behind HTTPS, uncomment/keep enabled:
 if os.environ.get("FLASK_ENV") == "production" or not app.debug:
     app.config["SESSION_COOKIE_SECURE"] = True
 
 # Flask-WTF / CSRF
 csrf = CSRFProtect(app)
+@csrf.error_handler
+def csrf_error(reason):
+    flash("Security token expired or missing. Please try again.", "error")
+    return redirect(url_for("login"))
+
 # Allow missing Referer when behind certain proxies/redirects; still validate token
 app.config["WTF_CSRF_SSL_STRICT"] = False
 app.config["WTF_CSRF_CHECK_DEFAULT"] = True  # default True; explicit for clarity
@@ -97,7 +105,7 @@ def add_security_headers(resp):
     resp.headers.setdefault("X-Frame-Options", "DENY")
     # Prevent MIME type sniffing
     resp.headers.setdefault("X-Content-Type-Options", "nosniff")
-    resp.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    resp.headers.setdefault("Referrer-Policy", "no-referrer-when-downgrade")
     # Avoid caching for authenticated users
     if 'user_id' in session:
         resp.headers["Cache-Control"] = "no-store"
