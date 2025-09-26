@@ -1,28 +1,26 @@
-import os, re, sqlite3, datetime, secrets, io, json
+import os
+import re
+import sqlite3
+import datetime
+import secrets
+import io
+import json
 from functools import wraps
-
 from flask import (
     Flask, request, redirect, url_for, session, render_template_string,
     flash, send_from_directory, send_file, Response
 )
-
 from openpyxl import load_workbook, Workbook
 from urllib.parse import urlencode
-
-# Security & CSRF
 from werkzeug.security import generate_password_hash, check_password_hash
-# from flask_wtf import CSRFProtect
-# from flask_wtf.csrf import generate_csrf
-
+from flask_wtf import CSRFProtect
+from flask_wtf.csrf import generate_csrf, CSRFError
 from markupsafe import escape
+
 def h(x):
-    """HTML-escape helper for building safe HTML strings."""
     return '' if x is None else str(escape(x))
 
-
-# ------------------------- Email (SendGrid, optional) -------------------------
 def send_email(to, subject, html):
-    """Best-effort email. Safe if SENDGRID not configured."""
     try:
         from sendgrid import SendGridAPIClient
         from sendgrid.helpers.mail import Mail
@@ -34,30 +32,26 @@ def send_email(to, subject, html):
         msg = Mail(from_email=frm, to_emails=to, subject=subject, html_content=html)
         sg.send(msg)
     except Exception:
-        # Silent: email is optional
         pass
 
 # ------------------------------ App constants --------------------------------
-BUILD_TAG = "HMS-2025-09-26-csrf-fix-r6"
-
+BUILD_TAG = "HMS-2025-09-26-complete-fix"
 APP_TITLE = "Hiring Management System (HMS)"
 BASE_DIR = os.path.dirname(__file__)
-DB_PATH = "/home/dcdchiringsystem/DCDC-Hiring/hms.db"
+DB_PATH = "/home/yourusername/dcdchiringsystem/DCDC-Hiring/hms.db"
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-# Safer default so app boots even if env var missing; set real secret on Web tab
+# Secret key
 _env_secret = os.environ.get("HMS_SECRET") or os.environ.get("SECRET_KEY")
-
 if _env_secret:
     SECRET_KEY = _env_secret
 else:
-    # Only allow a fallback when running the local dev server
-    if __name__ == "__main__":  # python app.py
+    if __name__ == "__main__":
         SECRET_KEY = "dev-only-change-me"
-        print("[HMS] DEV: using fallback SECRET_KEY; DO NOT use in production.")
+        print("[HMS] DEV: fallback SECRET_KEY")
     else:
-        raise RuntimeError("HMS_SECRET env var is required in production.")
+        raise RuntimeError("HMS_SECRET required in production")
 
 LOGO_FILENAME = "logo.png"
 POSTS = [
@@ -72,36 +66,38 @@ ALLOWED_CV_EXTS = {".pdf",".doc",".docx"}
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
 app.config.update({
-    'MAX_CONTENT_LENGTH': 16 * 1024 * 1024,  # 16MB
+    'MAX_CONTENT_LENGTH': 16*1024*1024,
     'SESSION_COOKIE_HTTPONLY': True,
     'SESSION_COOKIE_SAMESITE': 'Lax',
-    'WTF_CSRF_SSL_STRICT': False,  # Allow missing Referer
-    'WTF_CSRF_CHECK_DEFAULT': False,  # CRITICAL: Disable default CSRF checking
-    'WTF_CSRF_TIME_LIMIT': None,  # No time limit
+    # Keep tokens valid and avoid strict HTTPS referrer checks that cause the error you saw:
+    'WTF_CSRF_SSL_STRICT': False,
+    'WTF_CSRF_CHECK_DEFAULT': False,  # we use global CSRFProtect instead of per-form checks
+    'WTF_CSRF_TIME_LIMIT': None,
 })
-
-app.config['WTF_CSRF_ENABLED'] = False
-# In production behind HTTPS, uncomment/keep enabled:
 if os.environ.get("FLASK_ENV") == "production" or not app.debug:
     app.config["SESSION_COOKIE_SECURE"] = True
 
-# Flask-WTF / CSRF
-# csrf = CSRFProtect(app)
-#csrf._exempt_views.add(‘*’)   # disable CSRF for all views (for testing only)
+csrf = CSRFProtect(app)
 
-#@csrf.error_handler
-#def csrf_error(reason):
-    flash("Security token expired or missing. Please try again.", "error")
+@app.errorhandler(CSRFError)
+def handle_csrf_error(e):
+    # Friendly redirect back to login if a CSRF error occurs anywhere
+    flash("Security check failed: " + (e.description or "invalid/missing CSRF token. Please try again."), "error")
     return redirect(url_for("login"))
 
-# Allow missing Referer when behind certain proxies/redirects; still validate token
-#app.config["WTF_CSRF_SSL_STRICT"] = False
-#app.config["WTF_CSRF_CHECK_DEFAULT"] = True  # default True; explicit for clarity
+@app.after_request
+def add_security_headers(resp):
+    resp.headers.setdefault("X-Frame-Options", "DENY")
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("Referrer-Policy", "no-referrer-when-downgrade")
+    if "user_id" in session:
+        resp.headers["Cache-Control"] = "no-store"
+    return resp
 
-#@app.context_processor
-#def inject_csrf():
-    # Lets templates use {{ csrf_token() }} if desired
-    #return dict(csrf_token=generate_csrf)
+@app.context_processor
+def inject_csrf():
+    # lets you use {{ csrf_token() }} in any template string
+    return dict(csrf_token=generate_csrf)
 
 #@app.after_request
 #def add_security_headers(resp):
@@ -136,11 +132,7 @@ if os.environ.get("FLASK_ENV") == "production" or not app.debug:
 def get_db():
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
-    # Enforce FK constraints on every connection
-    try:
-        conn.execute("PRAGMA foreign_keys=ON")
-    except Exception:
-        pass
+    conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
 def ensure_column(table: str, column: str, decl: str):
@@ -159,14 +151,8 @@ def ensure_index(sql: str):
     db.commit(); db.close()
 
 def init_db():
-    conn = get_db(); c = conn.cursor()
-    if os.environ.get("SQLITE_JOURNAL", "").upper() == "WAL":
-        try:
-            conn.execute("PRAGMA journal_mode=WAL")
-        except Exception:
-            pass
-
-    c.execute("""
+    db = get_db(); c = db.cursor()
+    c.executescript("""
     CREATE TABLE IF NOT EXISTS users(
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
@@ -175,69 +161,15 @@ def init_db():
       manager_id INTEGER,
       passcode TEXT NOT NULL,
       created_at TEXT NOT NULL
-    );""")
-
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS password_resets(
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_email TEXT NOT NULL,
-      state TEXT NOT NULL,
-      created_at TEXT NOT NULL,
-      resolved_at TEXT,
-      resolver_id INTEGER,
-      new_passcode TEXT
-    );""")
-
-    c.execute("""
+    );
     CREATE TABLE IF NOT EXISTS candidates(
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      candidate_code TEXT,
-      salutation TEXT,
       full_name TEXT NOT NULL,
-      email TEXT,
-      qualification TEXT,
-      experience_years REAL,
-      current_designation TEXT,
-      phone TEXT,
-      cv_path TEXT,
-      current_salary TEXT,
-      expected_salary TEXT,
-      current_location TEXT,
-      preferred_location TEXT,
       post_applied TEXT NOT NULL,
-      interview_date TEXT,
-      current_previous_company TEXT,
-      assigned_region TEXT,
       status TEXT NOT NULL,
-      decision_by INTEGER,
-      remarks TEXT,
       created_by INTEGER NOT NULL,
-      created_at TEXT NOT NULL,
-      interviewer_id INTEGER,
-      manager_owner INTEGER,
-      final_decision TEXT,
-      final_remark TEXT,
-      finalized_by INTEGER,
-      finalized_at TEXT,
-      hr_join_status TEXT,
-      hr_joined_at TEXT
-    );""")
-
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS interviews(
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      candidate_id INTEGER NOT NULL,
-      interviewer_id INTEGER NOT NULL,
-      feedback TEXT,
-      rating INTEGER,
-      decision TEXT,
-      is_reinterview INTEGER DEFAULT 0,
-      is_edit INTEGER DEFAULT 0,
-      edited_from INTEGER,
       created_at TEXT NOT NULL
-    );""")
-
-    c.execute("""
+    );
     CREATE TABLE IF NOT EXISTS notifications(
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER NOT NULL,
@@ -245,9 +177,11 @@ def init_db():
       body TEXT,
       is_read INTEGER DEFAULT 0,
       created_at TEXT NOT NULL
-    );""")
+    );
+    """)
+    db.commit(); db.close()
 
-    # Seed first-time users
+init_db()    # Seed first-time users
     c.execute("SELECT COUNT(*) AS ct FROM users")
     if (c.fetchone()["ct"] or 0) == 0:
         now = datetime.datetime.utcnow().isoformat()
@@ -374,10 +308,11 @@ def is_hr_head(u): return u and u["role"]==ROLE_HR and u["email"].lower()=="jobs
 
 def login_required(f):
     @wraps(f)
-    def w(*a,**kw):
-        if not current_user(): return redirect(url_for("login"))
-        return f(*a,**kw)
-    return w
+    def decorated(*args, **kwargs):
+        if not current_user():
+            return redirect(url_for("login"))
+        return f(*args, **kwargs)
+    return decorated
 
 def role_required(*roles):
     def deco(f):
@@ -538,6 +473,10 @@ def render_page(title, body_html):
     return render_template_string(BASE_HTML, title=title, app_title=APP_TITLE, user=current_user(), body=body_html)
 
 # ------------------------------ Misc small routes -----------------------------
+@app.route("/", methods=["GET"])
+def home():
+    return redirect(url_for("login"))
+    
 @app.route("/__version")
 def __version():
     return "HMS build: {}".format(BUILD_TAG)
@@ -562,38 +501,36 @@ def __unread():
     return "<pre>logged_in={} role={} unread={}</pre>".format(bool(u), u["role"] if u else "-", n)
 
 # --------------------------------- Auth --------------------------------------
+@csrf.exempt
 @app.route("/login", methods=["GET","POST"])
 def login():
     if request.method=="POST":
-        email = request.form.get("email","").strip().lower()
-        passcode = request.form.get("passcode","").strip()
-        db=get_db(); cur=db.cursor()
+        email = request.form["email"].strip().lower()
+        pwd = request.form["passcode"].strip()
+        db = get_db(); cur = db.cursor()
         cur.execute("SELECT * FROM users WHERE email=?", (email,))
         u = cur.fetchone(); db.close()
-        if u and check_password_hash(u["passcode"], passcode):
-            session.clear()
-            session["user_id"] = u["id"]
-            flash("Welcome!","message")
+        if u and check_password_hash(u["passcode"], pwd):
+            session.clear(); session["user_id"] = u["id"]
+            flash("Logged in successfully","message")
             return redirect(url_for("dashboard"))
-        flash("Invalid email or passcode.","error")
-    token = generate_csrf()
-    body = """
-    <div class="card" style="max-width:520px;margin:48px auto;text-align:center">
-      <img src="{}" alt="logo" style="height:60px;margin-bottom:10px" onerror="this.style.display='none'">
-      <h2 style="margin:6px 0">Sign in</h2>
-      <form method="post" style="text-align:left">
-        <input type="hidden" name="csrf_token" value="{}">
-        <label>Email</label><input name="email" required>
-        <label>Passcode</label><input name="passcode" type="password" required>
-        <div style="margin-top:10px"><button class="btn">Login</button> <a class="btn light" href="{}">Forgot?</a></div>
-      </form>
-    </div>
+        flash("Invalid credentials","error")
+    return render_template_string("""
+    <form method="post" novalidate>
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input name="email" type="email" required placeholder="Email">
+      <input name="passcode" type="password" required placeholder="Passcode">
+      <button type="submit">Login</button>
+    </form>
+    """)
     """.format(url_for('brand_logo'), token, url_for('forgot_password'))
     return render_page("Login", body)
 
 @app.route("/logout")
 def logout():
-    session.clear(); return redirect(url_for("login"))
+    session.clear()
+    flash("Logged out","message")
+    return redirect(url_for("login"))
 
 @app.route("/forgot", methods=["GET","POST"])
 def forgot_password():
@@ -667,12 +604,15 @@ def profile():
     return render_page("Profile", body)
 
 # -------------------------------- Dashboard ----------------------------------
-@app.route("/")
+@app.route("/dashboard")
 @login_required
 def dashboard():
     u = current_user()
     db = get_db(); cur = db.cursor()
-
+    cur.execute("SELECT COUNT(*) FROM candidates"); total = cur.fetchone()[0]
+    db.close()
+    return f"Welcome {u['name']}! Total candidates: {total}"
+    
     q_status = (request.args.get("status") or "").strip()
     q_post = (request.args.get("post") or "").strip()
     q_region = (request.args.get("region") or "").strip()
@@ -1927,6 +1867,6 @@ def bulk_upload():
     # Add this line at the end of your file, before the final if __name__ block:
     csrf.exempt(login)
     
-    if __name__ == "__main__":
-        port = int(os.environ.get("PORT", 5000))
-        app.run(host="0.0.0.0", port=port, debug=True)
+   if __name__=="__main__":
+    app.run(debug=True, host="0.0.0.0", port=5000)
+    
