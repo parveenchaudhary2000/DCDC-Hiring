@@ -1,14 +1,14 @@
-import os, re, sqlite3, datetime, secrets, io, json
+import os
+import sqlite3
+import secrets
 from functools import wraps
-from flask import Flask, request, redirect, url_for, session, render_template_string, flash, send_from_directory, send_file, Response
-from openpyxl import load_workbook, Workbook
-from urllib.parse import urlencode
+from flask import (
+    Flask, request, redirect, url_for, session, render_template_string, flash
+)
 from werkzeug.security import generate_password_hash, check_password_hash
-from flask_wtf import CSRFProtect
-from flask_wtf.csrf import generate_csrf, CSRFError
 from markupsafe import escape
 
-def h(x): return '' if x is None else str(escape(x))
+
 
 def send_email(to, subject, html):
     try:
@@ -23,10 +23,20 @@ def send_email(to, subject, html):
         pass
 
 # ------------------------------ App constants --------------------------------
-BUILD_TAG = "HMS-2025-09-26-complete-fix"
+BUILD_TAG = "HMS-2025-09-26-CSRF-FIX-FINAL-100"
 APP_TITLE = "Hiring Management System (HMS)"
-BASE_DIR = os.path.dirname(__file__)
-DB_PATH = "/home/yourusername/dcdchiringsystem/DCDC-Hiring/hms.db"
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_DB_PATH = os.path.join(BASE_DIR, "hms.db")
+
+DB_PATH = (
+    os.environ.get("HMS_DB_PATH")
+    or "/home/dcdchiringsystem/DCDC-Hiring/hms.db"
+)
+if not os.path.exists(os.path.dirname(DB_PATH)):
+    DB_PATH = DEFAULT_DB_PATH 
+
+
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
@@ -57,14 +67,9 @@ app.config.update({
     'MAX_CONTENT_LENGTH': 16*1024*1024,
     'SESSION_COOKIE_HTTPONLY': True,
     'SESSION_COOKIE_SAMESITE': 'Lax',
-    # HTTPS referrer strict check band, warna privacy addons/PA pe 400 aata hai
-    'WTF_CSRF_SSL_STRICT': False,
-    'WTF_CSRF_TIME_LIMIT': None,
 })
 if os.environ.get("FLASK_ENV") == "production" or not app.debug:
     app.config["SESSION_COOKIE_SECURE"] = True
-
-csrf = CSRFProtect(app)
 
 @app.errorhandler(CSRFError)
 def handle_csrf_error(e):
@@ -88,10 +93,7 @@ def add_security_headers(resp):
         resp.headers["Cache-Control"] = "no-store"
     return resp
 
-@app.context_processor
-def inject_csrf():
-    # Use in templates as {{ csrf_token() }}
-    return dict(csrf_token=_get_or_make_csrf)
+
 
 #@app.after_request
 #def add_security_headers(resp):
@@ -175,7 +177,26 @@ def init_db():
     """)
     db.commit(); db.close()
 
-init_db()    
+def ensure_bootstrap_data():
+    """Create a default admin user and a sample notification if DB is empty."""
+    db = get_db(); cur = db.cursor()
+    cur.execute("SELECT COUNT(*) FROM users")
+    if (cur.fetchone()[0] or 0) == 0:
+        cur.execute(
+            "INSERT INTO users (name,email,role,passcode) VALUES (?,?,?,?)",
+            ("Admin", "admin@example.com", "admin", generate_password_hash("admin123"))
+        )
+        admin_id = cur.lastrowid
+        cur.execute(
+            "INSERT INTO notifications (user_id,title,body) VALUES (?,?,?)",
+            (admin_id, "Welcome", "You have successfully installed HMS.")
+        )
+        db.commit()
+        print("[HMS] Created default admin -> email: admin@example.com  pass: admin123")
+    db.close()
+
+init_db()
+ensure_bootstrap_data()  
 
     c.execute("SELECT COUNT(*) AS ct FROM users")
     if (c.fetchone()["ct"] or 0) == 0:
@@ -291,12 +312,17 @@ except Exception as e:
     print("[HMS] DB init/migrate warning:", e)
 
 # --------------------------- Helper / auth utilities --------------------------
+def h(x):
+    return "" if x is None else str(escape(x))
+
 def current_user():
     uid = session.get("user_id")
-    if not uid: return None
+    if not uid: 
+        return None
     db = get_db(); cur = db.cursor()
     cur.execute("SELECT * FROM users WHERE id=?", (uid,))
-    row = cur.fetchone(); db.close()
+    row = cur.fetchone(); 
+    db.close()
     return row
 
 def login_required(f):
@@ -316,18 +342,23 @@ def _get_or_make_csrf():
         session["_csrf_token"] = token
     return token
 
+@app.context_processor
+def inject_csrf():
+    # Use in templates as {{ csrf_token() }}
+    return dict(csrf_token=_get_or_make_csrf)
+
 def require_csrf(view):
     @wraps(view)
     def wrapper(*args, **kwargs):
-        if request.method in ("POST","PUT","PATCH","DELETE"):
+        if request.method in ("POST", "PUT", "PATCH", "DELETE"):
             sent = request.form.get("csrf_token") or request.headers.get("X-CSRF-Token")
             stored = session.get("_csrf_token")
             if not sent or not stored or sent != stored:
                 flash("Security token missing/invalid. Please try again.", "error")
-                # avoid relying on Referer for redirect
                 return redirect(url_for("login"))
         return view(*args, **kwargs)
     return wrapper
+    
 def role_required(*roles):
     def deco(f):
         @wraps(f)
@@ -515,37 +546,43 @@ def __unread():
     return "<pre>logged_in={} role={} unread={}</pre>".format(bool(u), u["role"] if u else "-", n)
 
 # --------------------------------- Auth --------------------------------------
-@csrf.exempt
-@app.route("/login", methods=["GET","POST"])
+@app.route("/login", methods=["GET", "POST"])
 def login():
-    if request.method=="POST":
-        email = request.form.get("email","").strip().lower()
-        pwd = request.form.get("passcode","").strip()
+    if request.method == "POST":
+        email = (request.form.get("email") or "").strip().lower()
+        pwd = (request.form.get("passcode") or "").strip()
         db = get_db(); cur = db.cursor()
         cur.execute("SELECT * FROM users WHERE email=?", (email,))
         u = cur.fetchone(); db.close()
         if u and check_password_hash(u["passcode"], pwd):
-            session.clear(); session["user_id"] = u["id"]
-            flash("Logged in successfully","message")
+            session.clear()
+            session["user_id"] = u["id"]
+            flash("Logged in successfully", "message")
             return redirect(url_for("dashboard"))
-        flash("Invalid credentials","error")
+        flash("Invalid credentials", "error")
     return render_template_string("""
-    <form method="post" novalidate>
-      <!-- token present (harmless here), but not enforced -->
-      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-      <input name="email" type="email" required placeholder="Email">
-      <input name="passcode" type="password" required placeholder="Passcode">
-      <button type="submit">Login</button>
-    </form>
-    """)
-
-    """.format(url_for('brand_logo'), token, url_for('forgot_password'))
+<!doctype html>
+<title>Login — {{ app_title }}</title>
+<h2>Sign in</h2>
+{% for cat, msg in get_flashed_messages(with_categories=True) %}
+  <div style="padding:8px;margin:6px 0;border:1px solid #ccc">{{ msg }}</div>
+{% endfor %}
+<form method="post" novalidate>
+  <!-- token present (not enforced on login) -->
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <p><input name="email" type="email" required placeholder="Email" style="width:260px"></p>
+  <p><input name="passcode" type="password" required placeholder="Passcode" style="width:260px"></p>
+  <button type="submit">Login</button>
+</form>
+<p style="opacity:.6">Build: {{ build }}</p>
+""", build=BUILD_TAG, app_title=APP_TITLE)
+""".format(url_for('brand_logo'), token, url_for('forgot_password'))
     return render_page("Login", body)
 
 @app.route("/logout", methods=["GET"])
 def logout():
     session.clear()
-    flash("Logged out","message")
+    flash("Logged out", "message")
     return redirect(url_for("login"))
 
 @app.route("/forgot", methods=["GET","POST"])
@@ -620,14 +657,23 @@ def profile():
     return render_page("Profile", body)
 
 # -------------------------------- Dashboard ----------------------------------
-@app.route("/dashboard")
+@app.route("/dashboard", methods=["GET"])
 @login_required
 def dashboard():
     u = current_user()
     db = get_db(); cur = db.cursor()
     cur.execute("SELECT COUNT(*) FROM candidates"); total = cur.fetchone()[0]
     db.close()
-    return f"Welcome {u['name']}! Total candidates: {total}"
+    return render_template_string("""
+<!doctype html>
+<title>Dashboard — {{ app_title }}</title>
+<h2>Dashboard</h2>
+<p>Welcome {{ h(u['name']) }}! Total candidates: {{ total }}</p>
+<p>
+  <a href="{{ url_for('notifications') }}">Notifications</a> |
+  <a href="{{ url_for('logout') }}">Logout</a>
+</p>
+""", u=u, total=total, h=h, app_title=APP_TITLE)
     
     q_status = (request.args.get("status") or "").strip()
     q_post = (request.args.get("post") or "").strip()
@@ -839,12 +885,40 @@ def dashboard():
 # ----------------------------- Notifications ---------------------------------
 @app.route("/notifications")
 @login_required
+@app.route("/notifications", methods=["GET"])
+@login_required
 def notifications():
-    u=current_user(); db=get_db(); cur=db.cursor()
-    cur.execute("""SELECT id,title,body,is_read,created_at
-                   FROM notifications WHERE user_id=? ORDER BY id DESC LIMIT 200""", (u["id"],))
+    u = current_user()
+    db = get_db(); cur = db.cursor()
+    cur.execute("""
+        SELECT id, title, body, is_read, created_at
+        FROM notifications
+        WHERE user_id=? ORDER BY created_at DESC
+    """, (u["id"],))
     rows = cur.fetchall(); db.close()
-    token = generate_csrf()
+    return render_template_string("""
+<!doctype html>
+<title>Notifications — {{ app_title }}</title>
+<h2>Your Notifications</h2>
+<ul>
+  {% for n in rows %}
+    <li style="margin:10px 0">
+      <strong>{{ h(n['title']) }}</strong>
+      {% if n['is_read'] %}<em style="opacity:.6"> (read)</em>{% endif %}<br>
+      {{ h(n['body'] or '') }}<br>
+      {% if not n['is_read'] %}
+        <form method="post" action="{{ url_for('mark_notif_read', nid=n['id']) }}" style="display:inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <button type="submit">Mark read</button>
+        </form>
+      {% endif %}
+    </li>
+  {% else %}
+    <li>No notifications.</li>
+  {% endfor %}
+</ul>
+<p><a href="{{ url_for('dashboard') }}">Back to Dashboard</a></p>
+""", rows=rows, h=h, app_title=APP_TITLE)
     trs = "".join([
         (
             "<tr><td>{}</td><td><strong>{}</strong><br>"
@@ -1882,8 +1956,7 @@ def bulk_upload():
     """.format(sample_cols, url_for('bulk_sample'), token, url_for('candidates_all'))
     return render_page("Bulk Upload", body)
 
-    
-   if __name__=="__main__":
-    print("=== RUNNING", BUILD_TAG, "===")
+if __name__ == "__main__":
+    print("=== RUNNING", BUILD_TAG, "DB:", DB_PATH, "===")
     app.run(debug=True, host="0.0.0.0", port=5000)
     
