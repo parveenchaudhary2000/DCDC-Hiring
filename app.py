@@ -11,8 +11,8 @@ from urllib.parse import urlencode
 
 # Security & CSRF
 from werkzeug.security import generate_password_hash, check_password_hash
-from flask_wtf import CSRFProtect
-from flask_wtf.csrf import generate_csrf
+# from flask_wtf import CSRFProtect
+# from flask_wtf.csrf import generate_csrf
 
 from markupsafe import escape
 def h(x):
@@ -79,54 +79,56 @@ app.config.update({
     'WTF_CSRF_CHECK_DEFAULT': False,  # CRITICAL: Disable default CSRF checking
     'WTF_CSRF_TIME_LIMIT': None,  # No time limit
 })
+
+app.config['WTF_CSRF_ENABLED'] = False
 # In production behind HTTPS, uncomment/keep enabled:
 if os.environ.get("FLASK_ENV") == "production" or not app.debug:
     app.config["SESSION_COOKIE_SECURE"] = True
 
 # Flask-WTF / CSRF
-csrf = CSRFProtect(app)
-csrf._exempt_views.add(‘*’)   # disable CSRF for all views (for testing only)
+# csrf = CSRFProtect(app)
+#csrf._exempt_views.add(‘*’)   # disable CSRF for all views (for testing only)
 
-@csrf.error_handler
-def csrf_error(reason):
+#@csrf.error_handler
+#def csrf_error(reason):
     flash("Security token expired or missing. Please try again.", "error")
     return redirect(url_for("login"))
 
 # Allow missing Referer when behind certain proxies/redirects; still validate token
-app.config["WTF_CSRF_SSL_STRICT"] = False
-app.config["WTF_CSRF_CHECK_DEFAULT"] = True  # default True; explicit for clarity
+#app.config["WTF_CSRF_SSL_STRICT"] = False
+#app.config["WTF_CSRF_CHECK_DEFAULT"] = True  # default True; explicit for clarity
 
-@app.context_processor
-def inject_csrf():
+#@app.context_processor
+#def inject_csrf():
     # Lets templates use {{ csrf_token() }} if desired
-    return dict(csrf_token=generate_csrf)
+    #return dict(csrf_token=generate_csrf)
 
-@app.after_request
-def add_security_headers(resp):
+#@app.after_request
+#def add_security_headers(resp):
     # Clickjacking protection
-    resp.headers.setdefault("X-Frame-Options", "DENY")
+    #resp.headers.setdefault("X-Frame-Options", "DENY")
     # Prevent MIME type sniffing
-    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
-    resp.headers.setdefault("Referrer-Policy", "no-referrer-when-downgrade")
+    #resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    #resp.headers.setdefault("Referrer-Policy", "no-referrer-when-downgrade")
     # Avoid caching for authenticated users
-    if 'user_id' in session:
-        resp.headers["Cache-Control"] = "no-store"
-    return resp
+    #if 'user_id' in session:
+        #resp.headers["Cache-Control"] = "no-store"
+    #return resp
 
-@app.route('/debug-csrf')
-def debug_csrf():
-    return f"""
-    <h3>CSRF Debug Info</h3>
-    <p>CSRF Token: {generate_csrf()}</p>
-    <p>WTF_CSRF_SSL_STRICT: {app.config.get('WTF_CSRF_SSL_STRICT', 'Not Set')}</p>
-    <p>Session: {dict(session)}</p>
-    <form method="post" action="/login">
-        <input type="hidden" name="csrf_token" value="{generate_csrf()}">
-        <input type="email" name="email" value="test@dcdc.co.in">
-        <input type="password" name="passcode" value="test">
-        <button type="submit">Test Login</button>
-    </form>
-    """
+#@app.route('/debug-csrf')
+#def debug_csrf():
+ #   return f"""
+  #  <h3>CSRF Debug Info</h3>
+   # <p>CSRF Token: {generate_csrf()}</p>
+    #<p>WTF_CSRF_SSL_STRICT: {app.config.get('WTF_CSRF_SSL_STRICT', 'Not Set')}</p>
+    #<p>Session: {dict(session)}</p>
+    #<form method="post" action="/login">
+     #   <input type="hidden" name="csrf_token" value="{generate_csrf()}">
+      3  <input type="email" name="email" value="test@dcdc.co.in">
+       # <input type="password" name="passcode" value="test">
+        #<button type="submit">Test Login</button>
+  #  </form>
+  #  """
 
 
 
