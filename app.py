@@ -97,11 +97,27 @@ def add_security_headers(resp):
     resp.headers.setdefault("X-Frame-Options", "DENY")
     # Prevent MIME type sniffing
     resp.headers.setdefault("X-Content-Type-Options", "nosniff")
-    resp.headers.setdefault("Referrer-Policy", "same-origin")
+    resp.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
     # Avoid caching for authenticated users
     if 'user_id' in session:
         resp.headers["Cache-Control"] = "no-store"
     return resp
+
+@app.route('/debug-csrf')
+def debug_csrf():
+    return f"""
+    <h3>CSRF Debug Info</h3>
+    <p>CSRF Token: {generate_csrf()}</p>
+    <p>WTF_CSRF_SSL_STRICT: {app.config.get('WTF_CSRF_SSL_STRICT', 'Not Set')}</p>
+    <p>Session: {dict(session)}</p>
+    <form method="post" action="/login">
+        <input type="hidden" name="csrf_token" value="{generate_csrf()}">
+        <input type="email" name="email" value="test@dcdc.co.in">
+        <input type="password" name="passcode" value="test">
+        <button type="submit">Test Login</button>
+    </form>
+    """
+
 
 # --------------------------------- Database ----------------------------------
 def get_db():
