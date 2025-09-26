@@ -539,6 +539,7 @@ def login():
     """.format(url_for('brand_logo'), token, url_for('forgot_password'))
     return render_page("Login", body)
 
+
 @app.route("/logout")
 def logout():
     session.clear(); return redirect(url_for("login"))
