@@ -15,11 +15,14 @@ from flask_wtf import CSRFProtect
 from flask_wtf.csrf import generate_csrf
 
 from markupsafe import escape
-def h(x): return '' if x is None else str(escape(x))
+def h(x):
+    """HTML-escape helper for building safe HTML strings."""
+    return '' if x is None else str(escape(x))
 
 
 # ------------------------- Email (SendGrid, optional) -------------------------
 def send_email(to, subject, html):
+    """Best-effort email. Safe if SENDGRID not configured."""
     try:
         from sendgrid import SendGridAPIClient
         from sendgrid.helpers.mail import Mail
@@ -31,11 +34,11 @@ def send_email(to, subject, html):
         msg = Mail(from_email=frm, to_emails=to, subject=subject, html_content=html)
         sg.send(msg)
     except Exception:
+        # Silent: email is optional
         pass
 
-
 # ------------------------------ App constants --------------------------------
-BUILD_TAG = "HMS-2025-09-26-r1"
+BUILD_TAG = "HMS-2025-09-24-fixes-r5"
 
 APP_TITLE = "Hiring Management System (HMS)"
 BASE_DIR = os.path.dirname(__file__)
@@ -43,45 +46,62 @@ DB_PATH = "/home/dcdchiringsystem/DCDC-Hiring/hms.db"
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-# Secret key
+# Safer default so app boots even if env var missing; set real secret on Web tab
 _env_secret = os.environ.get("HMS_SECRET") or os.environ.get("SECRET_KEY")
+
 if _env_secret:
     SECRET_KEY = _env_secret
 else:
-    if __name__ == "__main__":
+    # Only allow a fallback when running the local dev server
+    if __name__ == "__main__":  # python app.py
         SECRET_KEY = "dev-only-change-me"
-        print("[HMS] DEV: using fallback SECRET_KEY")
+        print("[HMS] DEV: using fallback SECRET_KEY; DO NOT use in production.")
     else:
-        raise RuntimeError("HMS_SECRET is required in production.")
+        raise RuntimeError("HMS_SECRET env var is required in production.")
 
+LOGO_FILENAME = "logo.png"
+POSTS = [
+    "Trainee", "Junior Technician", "Senior Technician",
+    "Staff Nurse", "Doctor", "DMO", "Others"
+]
+
+ROLE_ADMIN="admin"; ROLE_VP="vp"; ROLE_HR="hr"; ROLE_MANAGER="manager"; ROLE_INTERVIEWER="interviewer"
+ALLOWED_CV_EXTS = {".pdf",".doc",".docx"}
 
 # ------------------------------- Flask + CSRF --------------------------------
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
 app.config.update(
-    MAX_CONTENT_LENGTH=16 * 1024 * 1024,
+    MAX_CONTENT_LENGTH=16 * 1024 * 1024,  # 16MB
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
-    WTF_CSRF_SSL_STRICT=False,   # 🔑 allow missing Referer
 )
-if os.environ.get("FLASK_ENV") == "production":
+# In production behind HTTPS, uncomment/keep enabled:
+if os.environ.get("FLASK_ENV") == "production" or not app.debug:
     app.config["SESSION_COOKIE_SECURE"] = True
 
+# Flask-WTF / CSRF
 csrf = CSRFProtect(app)
-
-@app.after_request
-def add_security_headers(resp):
-    resp.headers.setdefault("X-Frame-Options", "DENY")
-    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
-    resp.headers.setdefault("Referrer-Policy", "same-origin")   # 🔑 needed for CSRF
-    if 'user_id' in session:
-        resp.headers["Cache-Control"] = "no-store"
-    return resp
+# Allow missing Referer when behind certain proxies/redirects; still validate token
+app.config["WTF_CSRF_SSL_STRICT"] = False
+app.config["WTF_CSRF_CHECK_DEFAULT"] = True  # default True; explicit for clarity
 
 @app.context_processor
 def inject_csrf():
+    # Lets templates use {{ csrf_token() }} if desired
     return dict(csrf_token=generate_csrf)
 
+@app.after_request
+def add_security_headers(resp):
+    # Clickjacking protection
+    resp.headers.setdefault("X-Frame-Options", "DENY")
+    # Prevent MIME type sniffing
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("Referrer-Policy", "same-origin")
+    # Avoid caching for authenticated users
+    if 'user_id' in session:
+        resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 # --------------------------------- Database ----------------------------------
 def get_db():
@@ -117,7 +137,6 @@ def init_db():
         except Exception:
             pass
 
-    
     c.execute("""
     CREATE TABLE IF NOT EXISTS users(
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -237,10 +256,14 @@ def init_db():
         c.execute("UPDATE users SET manager_id=? WHERE email='infectioncontroller@dcdc.co.in'", (yasir,))
         for em in ("rmclinical_4@dcdc.co.in","rmclinical_6@dcdc.co.in","clinical_therapist@dcdc.co.in"):
             c.execute("UPDATE users SET manager_id=? WHERE email=?", (saadi, em))
-        if seeded_credentials:
-            print("[HMS] Seeded default users with temporary passcodes:")
-            for email, passcode in seeded_credentials:
-                print("   - {} : {}".format(email, passcode))
+
+        # Only print seed creds in dev to avoid leaking into production logs
+        if __name__ == "__main__" or os.environ.get("PRINT_SEEDS") == "1":
+            if seeded_credentials:
+                print("[HMS] Seeded default users with temporary passcodes:")
+                for email, passcode in seeded_credentials:
+                    print("   - {} : {}".format(email, passcode))
+
     conn.commit(); conn.close()
 
     # Ensure new columns exist for older databases
@@ -539,7 +562,6 @@ def login():
     """.format(url_for('brand_logo'), token, url_for('forgot_password'))
     return render_page("Login", body)
 
-
 @app.route("/logout")
 def logout():
     session.clear(); return redirect(url_for("login"))
@@ -676,8 +698,6 @@ def dashboard():
         )
         for r in recent
     ]) or "<tr><td colspan=7>No candidates match your filters.</td></tr>"
-
-
 
     cur.execute(f"SELECT COALESCE(final_decision,'(no final)') k, COUNT(*) c FROM candidates WHERE {WHERE} GROUP BY k ORDER BY c DESC", args)
     status_rows = cur.fetchall()
@@ -1717,7 +1737,6 @@ def admin_resets():
                              AND datetime(expires_at) > datetime('now')""",
                         (int(rid), tok))
 
-
             row=cur.fetchone()
             if row:
                 cur.execute("UPDATE users SET passcode=? WHERE email=?", (generate_password_hash(newp),row["user_email"]))
@@ -1780,7 +1799,7 @@ def bulk_sample():
                "Mobile No.","Current Salary","Expected Salary","Current Location","Preferred location","Post applied",
                "Interview Date","Current/Previous company","Region","Status","remarks"]
     wb = Workbook(); ws = wb.active; ws.title = "Candidates"
-    for i,h in enumerate(headers, start=1): ws.cell(row=1, column=i).value = h
+    for i,hv in enumerate(headers, start=1): ws.cell(row=1, column=i).value = hv
     bio = io.BytesIO(); wb.save(bio); bio.seek(0)
     return send_file(bio, as_attachment=True, download_name="bulk_sample.xlsx",
                      mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
