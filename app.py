@@ -81,6 +81,7 @@ if os.environ.get("FLASK_ENV") == "production" or not app.debug:
     app.config["SESSION_COOKIE_SECURE"] = True
 
 csrf = CSRFProtect(app)
+app.config["WTF_CSRF_SSL_STRICT"] = False
 @app.after_request
 def add_security_headers(resp):
     # Clickjacking protection
