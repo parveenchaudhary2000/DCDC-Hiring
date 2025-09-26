@@ -90,8 +90,8 @@ def add_security_headers(resp):
 
 @app.context_processor
 def inject_csrf():
-    # {{ csrf_token() }} available in templates
-    return dict(csrf_token=generate_csrf)
+    # Use in templates as {{ csrf_token() }}
+    return dict(csrf_token=_get_or_make_csrf)
 
 #@app.after_request
 #def add_security_headers(resp):
@@ -114,11 +114,11 @@ def inject_csrf():
     #<p>Session: {dict(session)}</p>
     #<form method="post" action="/login">
      #   <input type="hidden" name="csrf_token" value="{generate_csrf()}">
-      3  <input type="email" name="email" value="test@dcdc.co.in">
+      #  <input type="email" name="email" value="test@dcdc.co.in">
        # <input type="password" name="passcode" value="test">
         #<button type="submit">Test Login</button>
-  #  </form>
-  #  """
+  # </form>
+  # """
 
 
 
@@ -299,8 +299,6 @@ def current_user():
     row = cur.fetchone(); db.close()
     return row
 
-def is_hr_head(u): return u and u["role"]==ROLE_HR and u["email"].lower()=="jobs@dcdc.co.in"
-
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -309,6 +307,27 @@ def login_required(f):
         return f(*args, **kwargs)
     return decorated
 
+def is_hr_head(u): return u and u["role"]==ROLE_HR and u["email"].lower()=="jobs@dcdc.co.in"
+
+def _get_or_make_csrf():
+    token = session.get("_csrf_token")
+    if not token:
+        token = secrets.token_urlsafe(32)
+        session["_csrf_token"] = token
+    return token
+
+def require_csrf(view):
+    @wraps(view)
+    def wrapper(*args, **kwargs):
+        if request.method in ("POST","PUT","PATCH","DELETE"):
+            sent = request.form.get("csrf_token") or request.headers.get("X-CSRF-Token")
+            stored = session.get("_csrf_token")
+            if not sent or not stored or sent != stored:
+                flash("Security token missing/invalid. Please try again.", "error")
+                # avoid relying on Referer for redirect
+                return redirect(url_for("login"))
+        return view(*args, **kwargs)
+    return wrapper
 def role_required(*roles):
     def deco(f):
         @wraps(f)
@@ -512,17 +531,18 @@ def login():
         flash("Invalid credentials","error")
     return render_template_string("""
     <form method="post" novalidate>
-      <!-- Exempted route: token optional (rakhna harmless hai) -->
+      <!-- token present (harmless here), but not enforced -->
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <input name="email" type="email" required placeholder="Email">
       <input name="passcode" type="password" required placeholder="Passcode">
       <button type="submit">Login</button>
     </form>
     """)
+
     """.format(url_for('brand_logo'), token, url_for('forgot_password'))
     return render_page("Login", body)
 
-@app.route("/logout")
+@app.route("/logout", methods=["GET"])
 def logout():
     session.clear()
     flash("Logged out","message")
@@ -1864,5 +1884,6 @@ def bulk_upload():
     csrf.exempt(login)
     
    if __name__=="__main__":
+    print("=== RUNNING", BUILD_TAG, "===")
     app.run(debug=True, host="0.0.0.0", port=5000)
     
