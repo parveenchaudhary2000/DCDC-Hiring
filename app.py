@@ -1,15 +1,6 @@
-import os
-import re
-import sqlite3
-import datetime
-import secrets
-import io
-import json
+import os, re, sqlite3, datetime, secrets, io, json
 from functools import wraps
-from flask import (
-    Flask, request, redirect, url_for, session, render_template_string,
-    flash, send_from_directory, send_file, Response
-)
+from flask import Flask, request, redirect, url_for, session, render_template_string, flash, send_from_directory, send_file, Response
 from openpyxl import load_workbook, Workbook
 from urllib.parse import urlencode
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -17,17 +8,14 @@ from flask_wtf import CSRFProtect
 from flask_wtf.csrf import generate_csrf, CSRFError
 from markupsafe import escape
 
-def h(x):
-    return '' if x is None else str(escape(x))
+def h(x): return '' if x is None else str(escape(x))
 
 def send_email(to, subject, html):
     try:
         from sendgrid import SendGridAPIClient
         from sendgrid.helpers.mail import Mail
-        key = os.environ.get("SENDGRID_API_KEY")
-        frm = os.environ.get("MAIL_FROM")
-        if not key or not frm or not to:
-            return
+        key = os.environ.get("SENDGRID_API_KEY"); frm = os.environ.get("MAIL_FROM")
+        if not key or not frm or not to: return
         sg = SendGridAPIClient(key)
         msg = Mail(from_email=frm, to_emails=to, subject=subject, html_content=html)
         sg.send(msg)
@@ -69,9 +57,8 @@ app.config.update({
     'MAX_CONTENT_LENGTH': 16*1024*1024,
     'SESSION_COOKIE_HTTPONLY': True,
     'SESSION_COOKIE_SAMESITE': 'Lax',
-    # Keep tokens valid and avoid strict HTTPS referrer checks that cause the error you saw:
+    # HTTPS referrer strict check band, warna privacy addons/PA pe 400 aata hai
     'WTF_CSRF_SSL_STRICT': False,
-    'WTF_CSRF_CHECK_DEFAULT': False,  # we use global CSRFProtect instead of per-form checks
     'WTF_CSRF_TIME_LIMIT': None,
 })
 if os.environ.get("FLASK_ENV") == "production" or not app.debug:
@@ -81,9 +68,16 @@ csrf = CSRFProtect(app)
 
 @app.errorhandler(CSRFError)
 def handle_csrf_error(e):
-    # Friendly redirect back to login if a CSRF error occurs anywhere
-    flash("Security check failed: " + (e.description or "invalid/missing CSRF token. Please try again."), "error")
+    flash("Security token missing/expired. Please refresh and try again.", "error")
     return redirect(url_for("login"))
+
+@app.errorhandler(400)
+def handle_400(e):
+    msg = str(e).lower()
+    if "referrer" in msg or "csrf" in msg:
+        flash("Security token check failed. Please try again.", "error")
+        return redirect(url_for("login"))
+    return str(e), 400
 
 @app.after_request
 def add_security_headers(resp):
@@ -96,7 +90,7 @@ def add_security_headers(resp):
 
 @app.context_processor
 def inject_csrf():
-    # lets you use {{ csrf_token() }} in any template string
+    # {{ csrf_token() }} available in templates
     return dict(csrf_token=generate_csrf)
 
 #@app.after_request
@@ -181,7 +175,8 @@ def init_db():
     """)
     db.commit(); db.close()
 
-init_db()    # Seed first-time users
+init_db()    
+
     c.execute("SELECT COUNT(*) AS ct FROM users")
     if (c.fetchone()["ct"] or 0) == 0:
         now = datetime.datetime.utcnow().isoformat()
@@ -505,8 +500,8 @@ def __unread():
 @app.route("/login", methods=["GET","POST"])
 def login():
     if request.method=="POST":
-        email = request.form["email"].strip().lower()
-        pwd = request.form["passcode"].strip()
+        email = request.form.get("email","").strip().lower()
+        pwd = request.form.get("passcode","").strip()
         db = get_db(); cur = db.cursor()
         cur.execute("SELECT * FROM users WHERE email=?", (email,))
         u = cur.fetchone(); db.close()
@@ -517,6 +512,7 @@ def login():
         flash("Invalid credentials","error")
     return render_template_string("""
     <form method="post" novalidate>
+      <!-- Exempted route: token optional (rakhna harmless hai) -->
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <input name="email" type="email" required placeholder="Email">
       <input name="passcode" type="password" required placeholder="Passcode">
