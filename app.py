@@ -870,11 +870,13 @@ def notifications():
 
 @app.route("/notifications/read/<int:nid>", methods=["POST"])
 @login_required
+@require_csrf
 def mark_notif_read(nid):
-    u=current_user(); db=get_db(); cur=db.cursor()
+    u = current_user()
+    db = get_db(); cur = db.cursor()
     cur.execute("UPDATE notifications SET is_read=1 WHERE id=? AND user_id=?", (nid, u["id"]))
     db.commit(); db.close()
-    return redirect(url_for('notifications'))
+    return redirect(url_for("notifications"))
 
 # -------------------------------- Candidates ---------------------------------
 @app.route("/candidates")
@@ -1880,8 +1882,6 @@ def bulk_upload():
     """.format(sample_cols, url_for('bulk_sample'), token, url_for('candidates_all'))
     return render_page("Bulk Upload", body)
 
-    # Add this line at the end of your file, before the final if __name__ block:
-    csrf.exempt(login)
     
    if __name__=="__main__":
     print("=== RUNNING", BUILD_TAG, "===")
