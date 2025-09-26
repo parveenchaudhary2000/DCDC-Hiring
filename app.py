@@ -82,6 +82,12 @@ if os.environ.get("FLASK_ENV") == "production" or not app.debug:
 
 csrf = CSRFProtect(app)
 app.config["WTF_CSRF_SSL_STRICT"] = False
+# CSRF configuration
+app.config["WTF_CSRF_SSL_STRICT"] = False   # allow missing Referer
+app.config["WTF_CSRF_CHECK_DEFAULT"] = True # still validate tokens
+
+
+
 @app.after_request
 def add_security_headers(resp):
     # Clickjacking protection
