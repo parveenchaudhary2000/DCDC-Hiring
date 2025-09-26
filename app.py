@@ -127,6 +127,7 @@ def debug_csrf():
     """
 
 
+
 # --------------------------------- Database ----------------------------------
 def get_db():
     conn = sqlite3.connect(DB_PATH, timeout=30)
@@ -1919,7 +1920,9 @@ def bulk_upload():
     """.format(sample_cols, url_for('bulk_sample'), token, url_for('candidates_all'))
     return render_page("Bulk Upload", body)
 
-# --------------------------------- Run (dev) ---------------------------------
-if __name__=="__main__":
-    port=int(os.environ.get("PORT",5000))
-    app.run(host="0.0.0.0", port=port, debug=True)
+    # Add this line at the end of your file, before the final if __name__ block:
+    csrf.exempt(login)
+    
+    if __name__ == "__main__":
+        port = int(os.environ.get("PORT", 5000))
+        app.run(host="0.0.0.0", port=port, debug=True)
