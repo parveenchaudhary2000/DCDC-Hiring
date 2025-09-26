@@ -15,14 +15,11 @@ from flask_wtf import CSRFProtect
 from flask_wtf.csrf import generate_csrf
 
 from markupsafe import escape
-def h(x):
-    """HTML-escape helper for building safe HTML strings."""
-    return '' if x is None else str(escape(x))
+def h(x): return '' if x is None else str(escape(x))
 
 
 # ------------------------- Email (SendGrid, optional) -------------------------
 def send_email(to, subject, html):
-    """Best-effort email. Safe if SENDGRID not configured."""
     try:
         from sendgrid import SendGridAPIClient
         from sendgrid.helpers.mail import Mail
@@ -34,11 +31,11 @@ def send_email(to, subject, html):
         msg = Mail(from_email=frm, to_emails=to, subject=subject, html_content=html)
         sg.send(msg)
     except Exception:
-        # Silent: email is optional
         pass
 
+
 # ------------------------------ App constants --------------------------------
-BUILD_TAG = "HMS-2025-09-24-fixes-r5"
+BUILD_TAG = "HMS-2025-09-26-r1"
 
 APP_TITLE = "Hiring Management System (HMS)"
 BASE_DIR = os.path.dirname(__file__)
@@ -46,64 +43,45 @@ DB_PATH = "/home/dcdchiringsystem/DCDC-Hiring/hms.db"
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-# Safer default so app boots even if env var missing; set real secret on Web tab
+# Secret key
 _env_secret = os.environ.get("HMS_SECRET") or os.environ.get("SECRET_KEY")
-
 if _env_secret:
     SECRET_KEY = _env_secret
 else:
-    # Only allow a fallback when running the local dev server
-    if __name__ == "__main__":  # python app.py
+    if __name__ == "__main__":
         SECRET_KEY = "dev-only-change-me"
-        print("[HMS] DEV: using fallback SECRET_KEY; DO NOT use in production.")
+        print("[HMS] DEV: using fallback SECRET_KEY")
     else:
-        raise RuntimeError("HMS_SECRET env var is required in production.")
+        raise RuntimeError("HMS_SECRET is required in production.")
 
-LOGO_FILENAME = "logo.png"
-POSTS = [
-    "Trainee", "Junior Technician", "Senior Technician",
-    "Staff Nurse", "Doctor", "DMO", "Others"
-]
-
-ROLE_ADMIN="admin"; ROLE_VP="vp"; ROLE_HR="hr"; ROLE_MANAGER="manager"; ROLE_INTERVIEWER="interviewer"
-ALLOWED_CV_EXTS = {".pdf",".doc",".docx"}
 
 # ------------------------------- Flask + CSRF --------------------------------
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
 app.config.update(
-    MAX_CONTENT_LENGTH=16 * 1024 * 1024,  # 16MB
+    MAX_CONTENT_LENGTH=16 * 1024 * 1024,
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
+    WTF_CSRF_SSL_STRICT=False,   # 🔑 allow missing Referer
 )
-# In production behind HTTPS, uncomment:
-if os.environ.get("FLASK_ENV") == "production" or not app.debug:
+if os.environ.get("FLASK_ENV") == "production":
     app.config["SESSION_COOKIE_SECURE"] = True
 
 csrf = CSRFProtect(app)
-app.config["WTF_CSRF_SSL_STRICT"] = False
-# CSRF configuration
-app.config["WTF_CSRF_SSL_STRICT"] = False   # allow missing Referer
-app.config["WTF_CSRF_CHECK_DEFAULT"] = True # still validate tokens
-
-
 
 @app.after_request
 def add_security_headers(resp):
-    # Clickjacking protection
     resp.headers.setdefault("X-Frame-Options", "DENY")
-    # Prevent MIME type sniffing
     resp.headers.setdefault("X-Content-Type-Options", "nosniff")
-    resp.headers.setdefault("Referrer-Policy", "same-origin")
-    # Avoid caching for authenticated users
+    resp.headers.setdefault("Referrer-Policy", "same-origin")   # 🔑 needed for CSRF
     if 'user_id' in session:
         resp.headers["Cache-Control"] = "no-store"
     return resp
 
 @app.context_processor
 def inject_csrf():
-    # For templates that want to call {{ csrf_token() }} manually
     return dict(csrf_token=generate_csrf)
+
 
 # --------------------------------- Database ----------------------------------
 def get_db():
