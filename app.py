@@ -94,8 +94,7 @@ def add_security_headers(resp):
     resp.headers.setdefault("X-Frame-Options", "DENY")
     # Prevent MIME type sniffing
     resp.headers.setdefault("X-Content-Type-Options", "nosniff")
-    # Don’t send referrer to other sites
-    resp.headers.setdefault("Referrer-Policy", "no-referrer")
+    resp.headers.setdefault("Referrer-Policy", "same-origin")
     # Avoid caching for authenticated users
     if 'user_id' in session:
         resp.headers["Cache-Control"] = "no-store"
