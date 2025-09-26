@@ -31,6 +31,14 @@ POSTS = ["Trainee","Junior Technician","Senior Technician","Staff Nurse","Doctor
 ALLOWED_CV_EXTS = {".pdf",".doc",".docx"}
 
 # ------------------------------- Flask setup ---------------------------------
+import os
+os.environ["WTF_CSRF_ENABLED"] = "false"
+os.environ["WTF_CSRF_CHECK_DEFAULT"] = "false"
+os.environ["WTF_CSRF_SSL_STRICT"] = "false"
+os.environ["WTF_CSRF_TIME_LIMIT"] = "0"
+
+
+
 app = Flask(__name__)
 app.config["WTF_CSRF_ENABLED"] = False
 app.config["WTF_CSRF_CHECK_DEFAULT"] = False
