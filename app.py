@@ -12,6 +12,9 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from openpyxl import load_workbook, Workbook
 from markupsafe import escape
 
+import os
+os.environ["WTF_CSRF_ENABLED"] = "false"   # env kill switch
+
 # ------------------------------ App constants --------------------------------
 BUILD_TAG   = "HMS-2025-09-26-CSRF-FIX-FULL"
 APP_TITLE   = "Hiring Management System (HMS)"
@@ -29,6 +32,10 @@ ALLOWED_CV_EXTS = {".pdf",".doc",".docx"}
 
 # ------------------------------- Flask setup ---------------------------------
 app = Flask(__name__)
+app.config["WTF_CSRF_ENABLED"] = False
+app.config["WTF_CSRF_CHECK_DEFAULT"] = False
+app.config["WTF_CSRF_SSL_STRICT"] = False
+app.config["WTF_CSRF_TIME_LIMIT"] = None
 app.secret_key = SECRET_KEY
 app.config.update({
     "MAX_CONTENT_LENGTH": 16*1024*1024,
