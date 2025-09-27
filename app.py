@@ -64,18 +64,43 @@ def add_security_headers(resp):
 # ------------------------------ Utilities ------------------------------------
 def h(x): return "" if x is None else str(escape(x))
 
+# def send_email(to, subject, html):
+#     """Safe no-op if SendGrid env vars are not present."""
+#     try:
+#         from sendgrid import SendGridAPIClient
+#         from sendgrid.helpers.mail import Mail
+#         key = os.environ.get("SENDGRID_API_KEY"); frm = os.environ.get("MAIL_FROM")
+#         if not key or not frm or not to: return
+#         sg = SendGridAPIClient(key)
+#         msg = Mail(from_email=frm, to_emails=to, subject=subject, html_content=html)
+#         sg.send(msg)
+#     except Exception:
+#         pass
+
 def send_email(to, subject, html):
-    """Safe no-op if SendGrid env vars are not present."""
+    """SMTP से मेल भेजो (SendGrid हटा दिया गया)।"""
     try:
-        from sendgrid import SendGridAPIClient
-        from sendgrid.helpers.mail import Mail
-        key = os.environ.get("SENDGRID_API_KEY"); frm = os.environ.get("MAIL_FROM")
-        if not key or not frm or not to: return
-        sg = SendGridAPIClient(key)
-        msg = Mail(from_email=frm, to_emails=to, subject=subject, html_content=html)
-        sg.send(msg)
-    except Exception:
-        pass
+        smtp_host = os.environ.get("SMTP_HOST", "smtp.gmail.com")
+        smtp_port = int(os.environ.get("SMTP_PORT", 587))
+        smtp_user = os.environ.get("SMTP_USER")
+        smtp_pass = os.environ.get("SMTP_PASS")
+        frm = os.environ.get("MAIL_FROM", smtp_user)
+
+        if not smtp_user or not smtp_pass or not to:
+            return
+
+        msg = MIMEText(html, "html")
+        msg["Subject"] = subject
+        msg["From"] = frm
+        msg["To"] = to
+
+        with smtplib.SMTP(smtp_host, smtp_port) as server:
+            server.starttls()
+            server.login(smtp_user, smtp_pass)
+            server.sendmail(frm, [to], msg.as_string())
+    except Exception as e:
+        print("[MAIL ERROR]", e)
+
 
 # ------------------------------ Database -------------------------------------
 def get_db():
