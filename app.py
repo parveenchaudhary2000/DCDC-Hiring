@@ -398,6 +398,38 @@ def brand_logo():
 def home(): return redirect(url_for("login"))
 
 # LOGIN — NOT CSRF-protected to avoid referrer issues
+# @app.route("/login", methods=["GET","POST"])
+# def login():
+#     if request.method=="POST":
+#         email = (request.form.get("email") or "").strip().lower()
+#         pwd   = (request.form.get("passcode") or "").strip()
+#         db = get_db(); cur = db.cursor()
+#         cur.execute("SELECT * FROM users WHERE email=?", (email,))
+#         u = cur.fetchone(); db.close()
+#         if u and check_password_hash(u["passcode"], pwd):
+#             session.clear(); session["user_id"] = u["id"]
+#             flash("Logged in successfully","message")
+#             return redirect(url_for("dashboard"))
+#         flash("Invalid credentials","error")
+#     body = f"""
+#     <div class="card" style="max-width:420px;margin:48px auto">
+#       <h2>Sign in</h2>
+#       # <form method="post" novalidate>
+#       #   <input type="hidden" name="csrf_token" value="{_get_or_make_csrf()}">
+#       #   <p><input name="email" type="email" required placeholder="Email" style="width:260px"></p>
+#       #   <p><input name="passcode" type="password" required placeholder="Passcode" style="width:260px"></p>
+#       #   <button class="btn" type="submit">Login</button>
+#       # </form>
+#     <form method="post" novalidate>
+#       <p><input name="email" type="email" required placeholder="Email" style="width:260px"></p>
+#       <p><input name="passcode" type="password" required placeholder="Passcode" style="width:260px"></p>
+#       <button class="btn" type="submit">Login</button>
+#     </form>
+#       <p style="opacity:.6">Build: {h(BUILD_TAG)}</p>
+#     </div>
+#     """
+#     return render_page("Login", body)
+
 @app.route("/login", methods=["GET","POST"])
 def login():
     if request.method=="POST":
@@ -407,28 +439,27 @@ def login():
         cur.execute("SELECT * FROM users WHERE email=?", (email,))
         u = cur.fetchone(); db.close()
         if u and check_password_hash(u["passcode"], pwd):
-            session.clear(); session["user_id"] = u["id"]
+            session.clear()
+            session["user_id"] = u["id"]
             flash("Logged in successfully","message")
             return redirect(url_for("dashboard"))
         flash("Invalid credentials","error")
+        return redirect(url_for("login"))
+    
+    # GET
     body = f"""
     <div class="card" style="max-width:420px;margin:48px auto">
       <h2>Sign in</h2>
-      # <form method="post" novalidate>
-      #   <input type="hidden" name="csrf_token" value="{_get_or_make_csrf()}">
-      #   <p><input name="email" type="email" required placeholder="Email" style="width:260px"></p>
-      #   <p><input name="passcode" type="password" required placeholder="Passcode" style="width:260px"></p>
-      #   <button class="btn" type="submit">Login</button>
-      # </form>
-    <form method="post" novalidate>
-      <p><input name="email" type="email" required placeholder="Email" style="width:260px"></p>
-      <p><input name="passcode" type="password" required placeholder="Passcode" style="width:260px"></p>
-      <button class="btn" type="submit">Login</button>
-    </form>
+      <form method="post" novalidate>
+        <p><input name="email" type="email" required placeholder="Email" style="width:260px"></p>
+        <p><input name="passcode" type="password" required placeholder="Passcode" style="width:260px"></p>
+        <button class="btn" type="submit">Login</button>
+      </form>
       <p style="opacity:.6">Build: {h(BUILD_TAG)}</p>
     </div>
     """
     return render_page("Login", body)
+
 
 @app.route("/logout")
 def logout():
